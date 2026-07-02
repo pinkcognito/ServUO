@@ -1,0 +1,55 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [pub57]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build ServUO.sln -c Debug -p:Platform=x64
+
+      - name: Test
+        run: dotnet test Server.Tests/Server.Tests.csproj -c Debug -p:Platform=x64
+
+  format-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine changed C# files
+        id: changed
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          files=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}"...HEAD -- '*.cs')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$files" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      # This is a large, long-established codebase with its own historical
+      # formatting - we only enforce style on files a PR actually touches,
+      # not the whole tree.
+      - name: Format check (changed files only)
+        if: steps.changed.outputs.files != ''
+        shell: bash
+        run: |
+          mapfile -t files <<< "${{ steps.changed.outputs.files }}"
+          dotnet format ServUO.sln --verify-no-changes --severity warn --include "${files[@]}"
