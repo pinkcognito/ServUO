@@ -13,7 +13,9 @@ namespace Server.Misc
     /// bot's /register command) within a grace period after creation - and
     /// automatically un-bans it once it does get linked, even if that
     /// happens after the ban. Staff accounts (AccessLevel > Player) are
-    /// never touched.
+    /// never touched. While still within the grace period, online
+    /// unregistered players get a periodic system message with their
+    /// remaining time.
     ///
     /// The bot writes linked account names to LinkedAccounts.txt (one per
     /// line) via SSM whenever /register runs - this is the only interface
@@ -23,7 +25,7 @@ namespace Server.Misc
     public class UnregisteredAccountBan
     {
         private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(5);
-        private static readonly TimeSpan GracePeriod = TimeSpan.FromHours(4);
+        private static readonly TimeSpan GracePeriod = TimeSpan.FromHours(1);
         private static readonly string LinkedAccountsPath = Path.Combine(Core.BaseDirectory, "LinkedAccounts.txt");
 
         public static void Initialize()
@@ -43,21 +45,34 @@ namespace Server.Misc
                 }
 
                 bool isLinked = linked.Contains(acc.Username);
-                bool pastGrace = (DateTime.UtcNow - acc.Created) > GracePeriod;
+                var remaining = GracePeriod - (DateTime.UtcNow - acc.Created);
 
-                if (!isLinked && pastGrace && !acc.Banned)
+                if (isLinked)
                 {
-                    acc.Banned = true;
-                    Console.WriteLine(
-                        "UnregisteredAccountBan: Banned unregistered account '{0}' (created {1:g} UTC)",
-                        acc.Username,
-                        acc.Created);
-                    KickIfOnline(acc);
+                    if (acc.Banned)
+                    {
+                        acc.Banned = false;
+                        Console.WriteLine("UnregisteredAccountBan: Un-banned newly-registered account '{0}'", acc.Username);
+                    }
+
+                    continue;
                 }
-                else if (isLinked && acc.Banned)
+
+                if (remaining <= TimeSpan.Zero)
                 {
-                    acc.Banned = false;
-                    Console.WriteLine("UnregisteredAccountBan: Un-banned newly-registered account '{0}'", acc.Username);
+                    if (!acc.Banned)
+                    {
+                        acc.Banned = true;
+                        Console.WriteLine(
+                            "UnregisteredAccountBan: Banned unregistered account '{0}' (created {1:g} UTC)",
+                            acc.Username,
+                            acc.Created);
+                        KickIfOnline(acc);
+                    }
+                }
+                else
+                {
+                    WarnIfOnline(acc, remaining);
                 }
             }
         }
@@ -67,6 +82,20 @@ namespace Server.Misc
             foreach (var ns in NetState.Instances.Where(n => n.Account == acc).ToArray())
             {
                 ns.Dispose();
+            }
+        }
+
+        private static void WarnIfOnline(IAccount acc, TimeSpan remaining)
+        {
+            var minutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+
+            foreach (var ns in NetState.Instances.Where(n => n.Account == acc && n.Mobile != null).ToArray())
+            {
+                ns.Mobile.SendMessage(
+                    0x35,
+                    "Your account isn't linked to Discord yet - run /register in Discord within {0} minute{1} or you'll be banned.",
+                    minutes,
+                    minutes == 1 ? "" : "s");
             }
         }
 
