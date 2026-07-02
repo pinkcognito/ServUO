@@ -20,7 +20,13 @@ namespace Server.Misc
     /// The bot writes linked account names to LinkedAccounts.txt (one per
     /// line) via SSM whenever /register runs - this is the only interface
     /// between the two systems, deliberately kept as simple as a shared
-    /// text file rather than anything requiring the AWS SDK in ServUO.
+    /// text file rather than anything requiring the AWS SDK in ServUO. A
+    /// FileSystemWatcher on that file triggers an immediate re-check
+    /// (debounced, and marshaled onto ServUO's own timer thread rather than
+    /// acting directly from the watcher's background thread) so un-banning
+    /// after /register doesn't wait for the next scheduled 5-minute tick -
+    /// banning itself still only happens on that periodic schedule, since
+    /// it depends on elapsed time, not a file change.
     /// </summary>
     public class UnregisteredAccountBan
     {
@@ -28,9 +34,38 @@ namespace Server.Misc
         private static readonly TimeSpan GracePeriod = TimeSpan.FromHours(1);
         private static readonly string LinkedAccountsPath = Path.Combine(Core.BaseDirectory, "LinkedAccounts.txt");
 
+        private static Timer m_DebounceTimer;
+
         public static void Initialize()
         {
             Timer.DelayCall(TimeSpan.Zero, CheckInterval, CheckAccounts);
+
+            try
+            {
+                var watcher = new FileSystemWatcher(Core.BaseDirectory, "LinkedAccounts.txt")
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+                    EnableRaisingEvents = true,
+                };
+
+                watcher.Changed += (sender, args) => ScheduleImmediateCheck();
+                watcher.Created += (sender, args) => ScheduleImmediateCheck();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("UnregisteredAccountBan: Failed to start file watcher: {0}", e.Message);
+            }
+        }
+
+        private static void ScheduleImmediateCheck()
+        {
+            // FileSystemWatcher fires on a background thread pool thread and
+            // can fire multiple times for a single logical write - debounce
+            // by restarting a short one-shot timer, which itself runs on
+            // ServUO's own timer thread (safe to touch Account/NetState from
+            // there, unlike directly from the watcher callback).
+            m_DebounceTimer?.Stop();
+            m_DebounceTimer = Timer.DelayCall(TimeSpan.FromSeconds(2), CheckAccounts);
         }
 
         private static void CheckAccounts()
