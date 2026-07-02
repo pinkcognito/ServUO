@@ -43,3 +43,6 @@
 
 !/Data/*
 !/bin/rosyln/*
+# xUnit test project build output
+/Server.Tests/bin/
+/Server.Tests/obj/
