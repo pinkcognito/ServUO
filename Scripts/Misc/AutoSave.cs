@@ -37,6 +37,22 @@ namespace Server.Misc
             m_Timer.Start();
 
             CommandSystem.Register("SetSaves", AccessLevel.Administrator, SetSaves_OnCommand);
+
+            // Core.Kill() (which an OS-level shutdown - e.g. the idle-shutdown
+            // Lambda's EC2 StopInstances - triggers via OnConsoleEvent) raises
+            // this event but otherwise never saves on its own; only the
+            // interactive "shutdown" console command explicitly calls Save()
+            // first. Without this, an automated stop can lose everything since
+            // the last periodic tick.
+            EventSink.Shutdown += OnShutdown;
+        }
+
+        private static void OnShutdown(ShutdownEventArgs e)
+        {
+            if (SavesEnabled)
+            {
+                Save();
+            }
         }
 
         [Usage("SetSaves <true | false>")]
