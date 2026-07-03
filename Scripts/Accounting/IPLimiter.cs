@@ -16,6 +16,7 @@ namespace Server.Misc
         public static IPAddress[] Exemptions { get; set; } = // For hosting services where there are cases where IPs can be proxied
         {
             IPAddress.Loopback,
+            IPAddress.Parse("216.255.34.170"), // Owner - plays both the Owner account and a regular test account
         };
 
         public static bool IsExempt(IPAddress ip)
