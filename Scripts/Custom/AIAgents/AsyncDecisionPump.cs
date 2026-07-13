@@ -145,20 +145,24 @@ namespace Server.Custom.AIAgents
         {
             Task.Run(async () =>
             {
+                DecisionResponse response = null;
+
                 try
                 {
-                    var response = await PostDecideAsync(request).ConfigureAwait(false);
-
-                    if (response != null)
-                    {
-                        _results.Enqueue(new DecisionResult(ai, response));
-                    }
+                    response = await PostDecideAsync(request).ConfigureAwait(false);
                 }
                 catch
                 {
                     // swallow: no action == FSM fallback (§2.2). A failed/slow
                     // decision must never be fatal or reach the game thread.
                 }
+
+                // Always enqueue, even on failure (response stays null) — this
+                // is the completion signal BotAI.ApplyActions needs to clear
+                // its "awaiting a decision" flag. Skipping the enqueue on
+                // failure would leave the bot permanently deaf after any
+                // sidecar 5xx or timeout.
+                _results.Enqueue(new DecisionResult(ai, response));
             });
         }
 
@@ -184,7 +188,17 @@ namespace Server.Custom.AIAgents
         {
             while (_results.TryDequeue(out var result))
             {
-                result.Ai.ApplyActions(result.Response.Actions);
+                try
+                {
+                    result.Ai.ApplyActions(result.Response?.Actions);
+                }
+                catch (Exception ex)
+                {
+                    // One bad apply (e.g. the mobile was deleted between
+                    // enqueue and drain) must not stop draining for every
+                    // other bot sharing this timer callback.
+                    Console.WriteLine("AsyncDecisionPump: ApplyActions failed: {0}", ex);
+                }
             }
         }
     }

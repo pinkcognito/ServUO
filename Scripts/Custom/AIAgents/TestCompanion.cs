@@ -34,8 +34,9 @@ namespace Server.Custom.AIAgents
 
             InitStats(60, 60, 25);
 
-            ((BotAI)AIObject).BotId = "amber-01";
-            ((BotAI)AIObject).PersonaId = "amber";
+            var botAi = (BotAI)AIObject;
+            botAi.BotId = "amber-01";
+            botAi.PersonaId = "amber";
         }
 
         private BotAI _botAI;
@@ -53,14 +54,29 @@ namespace Server.Custom.AIAgents
         {
             base.Serialize(writer);
 
-            writer.Write(0); // version
+            writer.Write(1); // version
+
+            var botAi = (BotAI)AIObject;
+            writer.Write(botAi.BotId);
+            writer.Write(botAi.PersonaId);
         }
 
         public override void Deserialize(GenericReader reader)
         {
             base.Deserialize(reader);
 
-            reader.ReadInt();
+            var version = reader.ReadInt();
+
+            // ChangeAIType (called from base.Deserialize) already re-created
+            // BotAI via ForcedAI — without these, a companion that survives a
+            // world save comes back with BotId/PersonaId == null (§5: the box
+            // restarts frequently, so this is the common path, not an edge case).
+            if (version >= 1)
+            {
+                var botAi = (BotAI)AIObject;
+                botAi.BotId = reader.ReadString();
+                botAi.PersonaId = reader.ReadString();
+            }
         }
     }
 }

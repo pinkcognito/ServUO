@@ -61,11 +61,15 @@ namespace Server.Custom.AIAgents
         }
 
         // Applied only on the game thread, via AsyncDecisionPump.DrainOnGameThread.
+        // Called with actions == null both when the sidecar returned "none"
+        // and when the decision failed/timed out (§2.2) — either way this is
+        // the completion signal that clears _awaitingDecision, so the bot
+        // never gets stuck ignoring speech after a failed turn.
         public void ApplyActions(List<DecisionAction> actions)
         {
             _awaitingDecision = false;
 
-            if (actions == null)
+            if (m_Mobile == null || m_Mobile.Deleted || actions == null)
             {
                 return;
             }
