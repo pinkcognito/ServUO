@@ -34,9 +34,14 @@ namespace Server.Custom.AIAgents
 
             InitStats(60, 60, 25);
 
+            // "fallback" is the one persona hardcoded into the sidecar itself
+            // (issue #32 - persona bundling was dropped in favor of a
+            // DynamoDB-backed store) so this spike bot keeps working with no
+            // DynamoDB setup required. Deploy a real persona via
+            // /persona-deploy and point PersonaId at it for anything else.
             var botAi = (BotAI)AIObject;
             botAi.BotId = "amber-01";
-            botAi.PersonaId = "amber";
+            botAi.PersonaId = "fallback";
         }
 
         private BotAI _botAI;
