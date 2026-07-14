@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 using Server.Mobiles;
 
 namespace Server.Custom.AIAgents
@@ -22,6 +25,20 @@ namespace Server.Custom.AIAgents
 
         public string PersonaId => ((BotAI)AIObject).PersonaId;
 
+        // Skill values are 0-120 on the live scale ServUO already uses
+        // everywhere else (SetSkill takes the same scale) - a persona
+        // author fat-fingering a bare 0-1000 "percent-ish" number would
+        // otherwise silently create a bugged mobile.
+        private const double MinSkillValue = 0.0;
+        private const double MaxSkillValue = 120.0;
+
+        // No engine-enforced cap for NPC stats, but personas come from an
+        // external, human-authored DynamoDB item - clamp to a generous but
+        // sane humanoid range so a bad value can't create a broken (e.g.
+        // negative Hits/Stam/Mana) mobile.
+        private const int MinStatValue = 1;
+        private const int MaxStatValue = 1000;
+
         // Applied once at spawn time (PersonaSync.Spawn). Appearance is not
         // re-applied on later poll ticks for an already-spawned bot - editing
         // a persona's prompt goes live via the sidecar's own cache (§ issue
@@ -38,6 +55,69 @@ namespace Server.Custom.AIAgents
             Title = cfg.DisplayName;
             Body = cfg.Body;
             Hue = cfg.Hue;
+
+            ApplySkills(cfg.Skills);
+            ApplyStats(cfg.Stats);
+        }
+
+        // Issue #36: starting skills matching the persona's backstory.
+        // Unknown skill names are ignored (logged) rather than rejecting the
+        // whole persona - a typo in one skill shouldn't block spawning.
+        private void ApplySkills(Dictionary<string, double> skills)
+        {
+            if (skills == null)
+            {
+                return;
+            }
+
+            foreach (var pair in skills)
+            {
+                if (!Enum.TryParse(pair.Key, true, out SkillName skill) || !Enum.IsDefined(typeof(SkillName), skill))
+                {
+                    Console.WriteLine("PersonaCompanion: persona '{0}' has unknown skill '{1}', ignoring", PersonaId, pair.Key);
+                    continue;
+                }
+
+                var value = pair.Value;
+                if (value < MinSkillValue || value > MaxSkillValue)
+                {
+                    Console.WriteLine(
+                        "PersonaCompanion: persona '{0}' skill '{1}' value {2} out of range, clamping",
+                        PersonaId, pair.Key, value);
+                    value = Math.Min(Math.Max(value, MinSkillValue), MaxSkillValue);
+                }
+
+                SetSkill(skill, value);
+            }
+        }
+
+        private void ApplyStats(Dictionary<string, int> stats)
+        {
+            if (stats == null)
+            {
+                return;
+            }
+
+            foreach (var pair in stats)
+            {
+                var value = Math.Min(Math.Max(pair.Value, MinStatValue), MaxStatValue);
+
+                switch (pair.Key.ToLowerInvariant())
+                {
+                    case "str":
+                        SetStr(value);
+                        break;
+                    case "dex":
+                        SetDex(value);
+                        break;
+                    case "int":
+                        SetInt(value);
+                        break;
+                    default:
+                        Console.WriteLine("PersonaCompanion: persona '{0}' has unknown stat '{1}', ignoring", PersonaId, pair.Key);
+                        break;
+                }
+            }
         }
 
         public PersonaCompanion(Serial serial)

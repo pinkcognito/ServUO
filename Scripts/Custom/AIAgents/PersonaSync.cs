@@ -53,6 +53,16 @@ namespace Server.Custom.AIAgents
 
         [JsonPropertyName("version")]
         public long Version { get; set; }
+
+        // Starting skills (issue #36) - keys are raw SkillName enum names
+        // ("AnimalTaming", "Magery", ...), values are the 0-120 skill scale.
+        // Absent/empty for personas authored before this schema addition.
+        [JsonPropertyName("skills")]
+        public Dictionary<string, double> Skills { get; set; }
+
+        // Starting stats (issue #36) - optional, keys "str"/"dex"/"int".
+        [JsonPropertyName("stats")]
+        public Dictionary<string, int> Stats { get; set; }
     }
 
     public sealed class PersonaListResponse
@@ -75,6 +85,8 @@ namespace Server.Custom.AIAgents
         public int Y;
         public int Z;
         public long Version;
+        public Dictionary<string, double> Skills;
+        public Dictionary<string, int> Stats;
     }
 
     // Polls the cognition sidecar's local /personas/enabled endpoint (issue
@@ -223,6 +235,8 @@ namespace Server.Custom.AIAgents
                     Y = item.Spawn.Y,
                     Z = item.Spawn.Z,
                     Version = item.Version,
+                    Skills = item.Skills,
+                    Stats = item.Stats,
                 };
 
                 _known[cfg.PersonaId] = cfg;
