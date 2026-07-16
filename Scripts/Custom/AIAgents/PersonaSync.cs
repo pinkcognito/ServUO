@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
@@ -297,6 +298,101 @@ namespace Server.Custom.AIAgents
 
                 _spawned.Remove(personaId);
             }
+        }
+
+        // Outcome of resolving a GM-typed reference (a raw persona_id or a
+        // display_name) to a concrete persona_id (issue #49). persona_ids are
+        // now auto-generated uuid4s, impractical to type in-game, so the GM
+        // commands accept the human-friendly display_name too.
+        public sealed class PersonaResolution
+        {
+            public bool Found;
+            // The resolved persona_id (set when Found). On an ambiguous
+            // display_name this is the most recently deployed match.
+            public string PersonaId;
+            // True when a display_name matched more than one persona.
+            public bool Ambiguous;
+            // All matching ids, most-recent first (set when Ambiguous) - so
+            // the command can report them and let the GM retype an exact id.
+            public List<string> Matches;
+        }
+
+        private struct Candidate
+        {
+            public string Id;
+            public string DisplayName;
+            public long Version;
+        }
+
+        // Resolves a reference against every currently enabled/known persona -
+        // the set the GM can spawn. Runs on the game thread (invoked from the
+        // command handler), same thread that mutates _known, so no locking.
+        public static PersonaResolution ResolveKnown(string reference)
+        {
+            var candidates = _known.Values
+                .Select(c => new Candidate { Id = c.PersonaId, DisplayName = c.DisplayName, Version = c.Version })
+                .ToList();
+            return Resolve(reference, candidates);
+        }
+
+        // Resolves a reference against currently-spawned companions - the set
+        // the GM can despawn. A companion carries its display_name in Title
+        // (set in PersonaCompanion.ConfigureFrom), which survives world saves,
+        // so despawn-by-name still works after a restart even for a persona
+        // that's since been disabled (and thus pruned from _known).
+        public static PersonaResolution ResolveSpawned(string reference)
+        {
+            var candidates = _spawned.Select(pair => new Candidate
+            {
+                Id = pair.Key,
+                DisplayName = pair.Value?.Title,
+                Version = _known.TryGetValue(pair.Key, out var cfg) ? cfg.Version : 0,
+            }).ToList();
+            return Resolve(reference, candidates);
+        }
+
+        private static PersonaResolution Resolve(string reference, List<Candidate> candidates)
+        {
+            if (string.IsNullOrEmpty(reference))
+            {
+                return new PersonaResolution { Found = false };
+            }
+
+            // An exact id match wins outright: ids are unique, so this is
+            // never ambiguous, and it keeps raw-id lookup working alongside
+            // the friendly display_name path.
+            foreach (var c in candidates)
+            {
+                if (string.Equals(c.Id, reference, StringComparison.Ordinal))
+                {
+                    return new PersonaResolution { Found = true, PersonaId = c.Id };
+                }
+            }
+
+            var byName = candidates
+                .Where(c => !string.IsNullOrEmpty(c.DisplayName) &&
+                            string.Equals(c.DisplayName, reference, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(c => c.Version)
+                .ToList();
+
+            if (byName.Count == 0)
+            {
+                return new PersonaResolution { Found = false };
+            }
+            if (byName.Count == 1)
+            {
+                return new PersonaResolution { Found = true, PersonaId = byName[0].Id };
+            }
+
+            // Ambiguous display_name: pick the most recently deployed match
+            // and report the full list so the GM can retype an exact id.
+            return new PersonaResolution
+            {
+                Found = true,
+                Ambiguous = true,
+                PersonaId = byName[0].Id,
+                Matches = byName.Select(c => c.Id).ToList(),
+            };
         }
 
         // Convenience for the in-game GM command (issue #32 Part 2): spawns
