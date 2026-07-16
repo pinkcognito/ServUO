@@ -49,8 +49,16 @@ namespace Server.Custom.AIAgents
         [JsonPropertyName("appearance")]
         public PersonaAppearance Appearance { get; set; }
 
+        // Optional (issue #48): a "gm"-mode persona is saved without
+        // coordinates for a GM to spawn on demand - Spawn is null in that
+        // case.
         [JsonPropertyName("spawn")]
         public PersonaSpawnPoint Spawn { get; set; }
+
+        // "auto" (default, requires+validates Spawn) or "gm" (event-only -
+        // never auto-spawned, regardless of whether Spawn is set).
+        [JsonPropertyName("spawn_mode")]
+        public string SpawnMode { get; set; }
 
         [JsonPropertyName("version")]
         public long Version { get; set; }
@@ -211,17 +219,33 @@ namespace Server.Custom.AIAgents
 
             foreach (var item in enabledPersonas)
             {
-                var map = Map.Parse(item.Spawn?.Map);
+                // "auto" (default) auto-spawns at Spawn's coordinates once
+                // validated; "gm" (issue #48, event-only) is never
+                // auto-spawned regardless of whether Spawn is set. Either
+                // way the persona still goes into _known below, so it stays
+                // GM-spawnable via `[SpawnPersona` even with no/invalid
+                // coordinates - that gating used to live in this loop's
+                // `continue`, which wrongly kept a coords-less persona out
+                // of _known entirely.
+                var mode = string.IsNullOrEmpty(item.SpawnMode) ? "auto" : item.SpawnMode;
 
-                if (map == null || map == Map.Internal || !IsValidSpawnPoint(map, item.Spawn.X, item.Spawn.Y))
+                Map map = null;
+                var hasValidSpawn = false;
+                if (item.Spawn != null)
                 {
-                    // Bad/unknown map or out-of-bounds coordinates - the
+                    map = Map.Parse(item.Spawn.Map);
+                    hasValidSpawn = map != null && map != Map.Internal && IsValidSpawnPoint(map, item.Spawn.X, item.Spawn.Y);
+                }
+
+                if (mode == "auto" && !hasValidSpawn)
+                {
+                    // Bad/unknown map, out-of-bounds coordinates, or no
+                    // spawn point at all for an "auto" persona - the
                     // Discord command already coarsely validates these, but
                     // this is the authoritative, server-side check (issue
-                    // #32: "reject invalid/illegal coordinates"). Skip this
-                    // persona rather than spawning somewhere broken.
-                    Console.WriteLine("PersonaSync: rejecting persona '{0}' - invalid spawn point", item.PersonaId);
-                    continue;
+                    // #32: "reject invalid/illegal coordinates"). Don't
+                    // auto-spawn it, but it's still added to _known below.
+                    Console.WriteLine("PersonaSync: persona '{0}' has no valid spawn point - GM-spawnable only", item.PersonaId);
                 }
 
                 var cfg = new PersonaConfig
@@ -231,10 +255,10 @@ namespace Server.Custom.AIAgents
                     Name = item.Appearance?.Name ?? item.PersonaId,
                     Body = item.Appearance?.Body ?? 0,
                     Hue = item.Appearance?.Hue ?? 0,
-                    Map = map,
-                    X = item.Spawn.X,
-                    Y = item.Spawn.Y,
-                    Z = item.Spawn.Z,
+                    Map = hasValidSpawn ? map : null,
+                    X = hasValidSpawn ? item.Spawn.X : 0,
+                    Y = hasValidSpawn ? item.Spawn.Y : 0,
+                    Z = hasValidSpawn ? item.Spawn.Z : 0,
                     Version = item.Version,
                     Skills = item.Skills,
                     Stats = item.Stats,
@@ -243,7 +267,7 @@ namespace Server.Custom.AIAgents
                 _known[cfg.PersonaId] = cfg;
                 stillEnabled.Add(cfg.PersonaId);
 
-                if (!_spawned.ContainsKey(cfg.PersonaId))
+                if (mode == "auto" && hasValidSpawn && !_spawned.ContainsKey(cfg.PersonaId))
                 {
                     Spawn(cfg);
                 }
