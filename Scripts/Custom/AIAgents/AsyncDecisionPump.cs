@@ -228,6 +228,13 @@ namespace Server.Custom.AIAgents
         private static readonly ConcurrentQueue<DecisionResult> _results = new ConcurrentQueue<DecisionResult>();
         private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
 
+        // Test-only seam (issue #68 Tier 2): the "zero /decide calls during
+        // combat" acceptance criterion needs a fake sidecar client rather
+        // than a real HTTP round-trip (no sidecar runs in CI). Production
+        // always uses the PostDecideAsync default; tests swap this in and
+        // restore it afterward.
+        internal static Func<DecisionRequest, Task<DecisionResponse>> Transport { get; set; } = PostDecideAsync;
+
         private sealed class DecisionResult
         {
             public DecisionResult(BotAI ai, DecisionResponse response)
@@ -255,7 +262,7 @@ namespace Server.Custom.AIAgents
 
                 try
                 {
-                    response = await PostDecideAsync(request).ConfigureAwait(false);
+                    response = await Transport(request).ConfigureAwait(false);
                 }
                 catch
                 {
