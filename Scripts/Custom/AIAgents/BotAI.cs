@@ -1,10 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 using Server.Items;
 using Server.Mobiles;
 using Server.Spells;
+
+// Issue #68 Tier 2: the headless integration harness needs to read
+// BotAI's delegated combat-AI state (stance type, timer liveness) to
+// assert the #57 regression and stance-selection criteria without a
+// full world/network stack. Test-only seam, not part of the /decide
+// contract.
+[assembly: InternalsVisibleTo("Server.Tests")]
 
 namespace Server.Custom.AIAgents
 {
@@ -60,6 +68,13 @@ namespace Server.Custom.AIAgents
         // (epic #35's not-yet-filed #39), not something to bake in as a
         // side effect of giving the companion a body.
         private BaseAI CombatAI => _combatAI ?? (_combatAI = CreateCombatAI());
+
+        // Test-only seam (issue #68 Tier 2) - exposes the delegated combat
+        // AI so integration tests can assert its concrete type (stance) and
+        // its own m_Timer.Running (the #57 double-timer regression) without
+        // reimplementing SelectCombatAI's logic or reflecting into a private
+        // field.
+        internal BaseAI DebugCombatAI => CombatAI;
 
         private BaseAI CreateCombatAI()
         {
