@@ -72,16 +72,7 @@ namespace Server.Custom.AIAgents
 
             foreach (var pair in skills)
             {
-                // ServUO's enum member is SkillName.Swords, but its display
-                // name (and every player-facing reference, including this
-                // issue's own acceptance test) is "Swordsmanship" - alias it
-                // so a persona author writing the name a human would use
-                // doesn't silently no-op (issue #57).
-                var skillKey = string.Equals(pair.Key, "Swordsmanship", StringComparison.OrdinalIgnoreCase)
-                    ? nameof(SkillName.Swords)
-                    : pair.Key;
-
-                if (!Enum.TryParse(skillKey, true, out SkillName skill) || !Enum.IsDefined(typeof(SkillName), skill))
+                if (!SkillNameAliases.TryParse(pair.Key, out var skill))
                 {
                     Console.WriteLine("PersonaCompanion: persona '{0}' has unknown skill '{1}', ignoring", PersonaId, pair.Key);
                     continue;
