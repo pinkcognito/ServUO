@@ -52,6 +52,22 @@ namespace Server.Custom.AIAgents
 
         private BaseAI CreateCombatAI()
         {
+            var combatAI = SelectCombatAI();
+
+            // BaseAI's constructor starts its own AITimer, which would tick
+            // combatAI.Think() independently of BotAI's own timer/gate -
+            // two AIs driving one mobile at once, and ShouldFullThink()
+            // silently bypassed for whichever one runs on its own clock
+            // (review on PR #7). combatAI is driven exclusively through the
+            // CombatAI.Think() delegation in Think() below, so stop its
+            // timer immediately; Think() itself has no timer dependency.
+            combatAI.m_Timer.Stop();
+
+            return combatAI;
+        }
+
+        private BaseAI SelectCombatAI()
+        {
             var magery = m_Mobile.Skills[SkillName.Magery].Base;
             var archery = m_Mobile.Skills[SkillName.Archery].Base;
             var melee = new[]
