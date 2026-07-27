@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using Server.Mobiles;
+using Server.Spells;
 
 namespace Server.Custom.AIAgents
 {
@@ -214,15 +215,150 @@ namespace Server.Custom.AIAgents
                 {
                     Speaker = speaker.Name,
                     Text = speech,
-                    Self = new DecisionSelfState
-                    {
-                        Loc = new double[] { m_Mobile.X, m_Mobile.Y, m_Mobile.Z },
-                        HpPct = m_Mobile.HitsMax > 0 ? (double)m_Mobile.Hits / m_Mobile.HitsMax : 1.0,
-                        State = m_Mobile.Combatant != null ? "combat" : "idle",
-                    },
+                    Self = BuildSelfState(),
                     Nearby = BuildNearby(),
                 },
             };
+        }
+
+        // Issue #58 (epic #35 deliverable 2): the live character sheet. Every
+        // value is read straight off m_Mobile at request time - never off
+        // the persona record - so it reflects what the bot actually has
+        // (current gear, trained skills, castable spells), not what the
+        // persona was authored with. Only runs on a speech-triggered
+        // /decide, not the Think() tick loop, so the extra reads here don't
+        // compound the per-tick cost invariant (§ issue #58 "keep it
+        // cheap").
+        private DecisionSelfState BuildSelfState()
+        {
+            return new DecisionSelfState
+            {
+                Loc = new double[] { m_Mobile.X, m_Mobile.Y, m_Mobile.Z },
+                HpPct = m_Mobile.HitsMax > 0 ? (double)m_Mobile.Hits / m_Mobile.HitsMax : 1.0,
+                State = m_Mobile.Combatant != null ? "combat" : "idle",
+                Stats = new DecisionStats { Str = m_Mobile.Str, Dex = m_Mobile.Dex, Int = m_Mobile.Int },
+                Vitals = new DecisionVitals
+                {
+                    Hp = m_Mobile.Hits,
+                    HpMax = m_Mobile.HitsMax,
+                    Mana = m_Mobile.Mana,
+                    ManaMax = m_Mobile.ManaMax,
+                    Stam = m_Mobile.Stam,
+                    StamMax = m_Mobile.StamMax,
+                },
+                Skills = BuildSkills(),
+                Equipment = BuildEquipment(),
+                Spells = BuildCastableSpells(),
+            };
+        }
+
+        // Only trained skills (Base > 0) are reported - Mobile.Skills covers
+        // every SkillName the engine knows, almost all zero for any one bot.
+        private Dictionary<string, double> BuildSkills()
+        {
+            var allSkills = new Dictionary<string, double>();
+
+            foreach (Skill skill in m_Mobile.Skills)
+            {
+                allSkills[skill.Name] = skill.Base;
+            }
+
+            return SelfModelBuilder.FilterTrainedSkills(allSkills);
+        }
+
+        // No separate cap here (unlike spells, issue #58): a mobile can wear
+        // at most one item per layer, and SelfModelBuilder.IsEquipmentLayer
+        // already restricts this to the ~20 wearable-gear layers - the list
+        // is inherently bounded by anatomy.
+        private List<DecisionEquipmentItem> BuildEquipment()
+        {
+            var equipment = new List<DecisionEquipmentItem>();
+
+            foreach (var item in m_Mobile.Items)
+            {
+                if (item.Deleted || !SelfModelBuilder.IsEquipmentLayer(item.Layer))
+                {
+                    continue;
+                }
+
+                equipment.Add(new DecisionEquipmentItem { Layer = item.Layer.ToString(), Name = item.Name ?? item.GetType().Name });
+            }
+
+            return equipment;
+        }
+
+        // Spells this bot can cast right now (skill + mana both sufficient),
+        // scoped to Magery - the only school BotAI's combat delegation
+        // (SelectCombatAI/MageAI) actually casts from. Gated on having any
+        // trained Magery at all so a non-caster bot does zero spell-registry
+        // work. Cost/precondition data (circle, mana, reagents) is read off
+        // a real constructed spell instance via SpellRegistry, never
+        // hand-duplicated (issue #58 anti-hallucination invariant).
+        private List<DecisionSpell> BuildCastableSpells()
+        {
+            var magerySkill = m_Mobile.Skills[SkillName.Magery].Value;
+
+            if (magerySkill <= 0)
+            {
+                return new List<DecisionSpell>();
+            }
+
+            // Matches the range every stock targeted Magery spell uses
+            // (e.g. Heal, MagicArrow) - per-spell target range lives in each
+            // spell's private nested Target class, not on the public Spell
+            // API, so this well-known engine constant stands in for it
+            // rather than reflecting into private types.
+            var range = Core.ML ? 10 : 12;
+
+            var castable = new List<DecisionSpell>();
+            var types = SpellRegistry.Types;
+
+            for (var id = 0; id < types.Length; id++)
+            {
+                var type = types[id];
+                if (type == null || !typeof(MagerySpell).IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                if (!(SpellRegistry.NewSpell(id, m_Mobile, null) is MagerySpell spell))
+                {
+                    continue;
+                }
+
+                spell.GetCastSkills(out var minCastSkill, out _);
+                var manaCost = spell.GetMana();
+
+                if (!SelfModelBuilder.IsSpellCastable(magerySkill, m_Mobile.Mana, minCastSkill, manaCost))
+                {
+                    continue;
+                }
+
+                castable.Add(new DecisionSpell
+                {
+                    Name = spell.Name,
+                    Circle = (int)spell.Circle + 1,
+                    Mana = manaCost,
+                    Range = range,
+                    Reagents = BuildReagents(spell),
+                });
+            }
+
+            return SelfModelBuilder.CapList(castable, SelfModelBuilder.MaxCastableSpells);
+        }
+
+        private static List<DecisionReagentCost> BuildReagents(Spell spell)
+        {
+            var reagents = new List<DecisionReagentCost>();
+            var types = spell.Info.Reagents ?? Array.Empty<Type>();
+            var amounts = spell.Info.Amounts ?? Array.Empty<int>();
+
+            for (var i = 0; i < types.Length; i++)
+            {
+                reagents.Add(new DecisionReagentCost { Name = types[i].Name, Amount = i < amounts.Length ? amounts[i] : 1 });
+            }
+
+            return reagents;
         }
 
         private List<DecisionNearby> BuildNearby()

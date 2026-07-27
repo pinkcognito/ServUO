@@ -54,6 +54,99 @@ namespace Server.Custom.AIAgents
 
         [JsonPropertyName("state")]
         public string State { get; set; }
+
+        // Issue #58 (epic #35 deliverable 2): the live character sheet,
+        // additive to the three fields above. Always read from ServUO at
+        // request time, never from the authored persona record (§2.4: the
+        // observation is authoritative, live game state; if it disagrees
+        // with what the persona was authored with, the observation wins).
+        [JsonPropertyName("stats")]
+        public DecisionStats Stats { get; set; }
+
+        [JsonPropertyName("vitals")]
+        public DecisionVitals Vitals { get; set; }
+
+        [JsonPropertyName("skills")]
+        public Dictionary<string, double> Skills { get; set; } = new Dictionary<string, double>();
+
+        [JsonPropertyName("equipment")]
+        public List<DecisionEquipmentItem> Equipment { get; set; } = new List<DecisionEquipmentItem>();
+
+        [JsonPropertyName("spells")]
+        public List<DecisionSpell> Spells { get; set; } = new List<DecisionSpell>();
+    }
+
+    public sealed class DecisionStats
+    {
+        [JsonPropertyName("str")]
+        public int Str { get; set; }
+
+        [JsonPropertyName("dex")]
+        public int Dex { get; set; }
+
+        [JsonPropertyName("int")]
+        public int Int { get; set; }
+    }
+
+    public sealed class DecisionVitals
+    {
+        [JsonPropertyName("hp")]
+        public int Hp { get; set; }
+
+        [JsonPropertyName("hp_max")]
+        public int HpMax { get; set; }
+
+        [JsonPropertyName("mana")]
+        public int Mana { get; set; }
+
+        [JsonPropertyName("mana_max")]
+        public int ManaMax { get; set; }
+
+        [JsonPropertyName("stam")]
+        public int Stam { get; set; }
+
+        [JsonPropertyName("stam_max")]
+        public int StamMax { get; set; }
+    }
+
+    public sealed class DecisionEquipmentItem
+    {
+        [JsonPropertyName("layer")]
+        public string Layer { get; set; }
+
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+    }
+
+    // A spell's cast preconditions/costs, per issue #58: "each ability's
+    // preconditions/costs (mana, reagents, range)". Only spells the bot can
+    // actually cast right now (skill + mana both sufficient) are included -
+    // this is a "what can I do" list, not the whole spellbook.
+    public sealed class DecisionSpell
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("circle")]
+        public int Circle { get; set; }
+
+        [JsonPropertyName("mana")]
+        public int Mana { get; set; }
+
+        [JsonPropertyName("range")]
+        public int Range { get; set; }
+
+        [JsonPropertyName("reagents")]
+        public List<DecisionReagentCost> Reagents { get; set; } = new List<DecisionReagentCost>();
+    }
+
+    public sealed class DecisionReagentCost
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("amount")]
+        public int Amount { get; set; }
     }
 
     public sealed class DecisionNearby
