@@ -1,18 +1,20 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using Server.Mobiles;
 
 namespace Server.Custom.AIAgents
 {
     // Thin adapter over the frozen /decide contract (§2.2). Reflexive
-    // behavior (wander/flee) stays on the inherited BaseAI FSM; only
-    // conversation hits the cognition sidecar.
+    // behavior (wander/flee/combat) stays on the inherited BaseAI FSM
+    // (issue #57); only conversation hits the cognition sidecar.
     public class BotAI : BaseAI
     {
         private const int NearbyRange = 10;
 
         private bool _awaitingDecision;
+        private BaseAI _combatAI;
 
         public string BotId { get; set; }
         public string PersonaId { get; set; }
@@ -21,6 +23,56 @@ namespace Server.Custom.AIAgents
         public BotAI(BaseCreature m)
             : base(m)
         {
+        }
+
+        // LOD seam (epic #35 decision 1): always true for now. A future
+        // level-of-detail check (player-in-range, tick round-robin) drops in
+        // here without touching the behavior layer below.
+        protected virtual bool ShouldFullThink() => true;
+
+        // Issue #57: combat execution is delegated to a stock ServUO AI
+        // template rather than reimplemented - MeleeAI/ArcherAI/MageAI
+        // already know how to swing, path, cast, and (critically) flee at
+        // low HP. Picked once from the self-model (skills already applied
+        // via PersonaCompanion.ApplySkills / SetSkill) and cached; skills
+        // don't change post-spawn, and they're already part of the Mobile's
+        // own serialized state, so this is correctly re-derived after a
+        // world-save/restart with no extra serialization of our own.
+        //
+        // Deliberately NOT using BaseCreature.Controlled/ControlMaster (the
+        // stock pet-order system) despite it being the most direct reuse:
+        // every stock AI's flee check is explicitly gated
+        // `!Controlled && !Summoned && CanFlee` (see MeleeAI/ArcherAI/MageAI
+        // DoActionCombat) - a controlled pet never flees. That would break
+        // the "flees at low HP" acceptance criterion outright. Bonding a
+        // companion to a specific player is also a real design question
+        // (epic #35's not-yet-filed #39), not something to bake in as a
+        // side effect of giving the companion a body.
+        private BaseAI CombatAI => _combatAI ?? (_combatAI = CreateCombatAI());
+
+        private BaseAI CreateCombatAI()
+        {
+            var magery = m_Mobile.Skills[SkillName.Magery].Base;
+            var archery = m_Mobile.Skills[SkillName.Archery].Base;
+            var melee = new[]
+            {
+                m_Mobile.Skills[SkillName.Swords].Base,
+                m_Mobile.Skills[SkillName.Fencing].Base,
+                m_Mobile.Skills[SkillName.Macing].Base,
+                m_Mobile.Skills[SkillName.Wrestling].Base,
+            }.Max();
+
+            if (magery > 0 && magery >= archery && magery >= melee)
+            {
+                return new MageAI(m_Mobile);
+            }
+
+            if (archery > 0 && archery >= melee)
+            {
+                return new ArcherAI(m_Mobile);
+            }
+
+            return new MeleeAI(m_Mobile);
         }
 
         public override bool HandlesOnSpeech(Mobile from)
@@ -44,6 +96,31 @@ namespace Server.Custom.AIAgents
 
         public override bool Think()
         {
+            if (m_Mobile.Deleted)
+            {
+                return false;
+            }
+
+            if (!ShouldFullThink())
+            {
+                return true;
+            }
+
+            // Defend self / engage take priority over following - a
+            // companion that keeps walking at its friend while being hit
+            // is not "fighting back" (acceptance: attack it -> it fights
+            // back). Once engaged (combat/guard/flee), stay delegated to
+            // CombatAI until it settles back to Wander on its own.
+            if (m_Mobile.Combatant != null || CombatAI.Action != ActionType.Wander)
+            {
+                if (CombatAI.Action == ActionType.Wander)
+                {
+                    CombatAI.Action = ActionType.Combat;
+                }
+
+                return CombatAI.Think();
+            }
+
             if (FollowTarget != null && !FollowTarget.Deleted && FollowTarget.Map == m_Mobile.Map &&
                 FollowTarget.Alive)
             {
