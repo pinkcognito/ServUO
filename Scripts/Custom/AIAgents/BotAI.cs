@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using Server.Items;
 using Server.Mobiles;
 using Server.Spells;
 
@@ -16,10 +17,19 @@ namespace Server.Custom.AIAgents
 
         private bool _awaitingDecision;
         private BaseAI _combatAI;
+        private (int X, int Y)? _moveDestination;
 
         public string BotId { get; set; }
         public string PersonaId { get; set; }
         public Mobile FollowTarget { get; set; }
+
+        // Issue #59: who this bot is protecting. Not the stock
+        // Controlled/ControlMaster guard order - BotAI deliberately stays
+        // un-Controlled (see CombatAI's doc comment: Controlled pets never
+        // flee, which would break this same issue's `flee` action). Think()
+        // engages GuardTarget's attacker directly, the same
+        // set-Combatant-and-let-CombatAI-fight pattern `attack` uses below.
+        public Mobile GuardTarget { get; set; }
 
         public BotAI(BaseCreature m)
             : base(m)
@@ -121,6 +131,17 @@ namespace Server.Custom.AIAgents
                 return true;
             }
 
+            // Issue #59 `defend`: if the bot isn't already fighting, and its
+            // GuardTarget is, engage whoever the GuardTarget is fighting.
+            // A heuristic ("GuardTarget.Combatant" is whoever last engaged
+            // it, not a full threat table) but it's real live game state,
+            // never the observation's claim (invariant 2).
+            if (m_Mobile.Combatant == null && GuardTarget != null && !GuardTarget.Deleted && GuardTarget.Alive &&
+                GuardTarget.Map == m_Mobile.Map && GuardTarget.Combatant != null && GuardTarget.Combatant.Alive)
+            {
+                m_Mobile.Combatant = GuardTarget.Combatant;
+            }
+
             // Defend self / engage take priority over following - a
             // companion that keeps walking at its friend while being hit
             // is not "fighting back" (acceptance: attack it -> it fights
@@ -134,6 +155,30 @@ namespace Server.Custom.AIAgents
                 }
 
                 return CombatAI.Think();
+            }
+
+            // Issue #59 `move_to`: a fresh, explicit reposition order
+            // preempts a standing `follow` for the tick(s) it takes to
+            // arrive - once _moveDestination clears, normal follow/wander
+            // resumes below. Stepped one tile per Think() (same idiom as
+            // FollowTarget below) rather than teleported, so the engine's
+            // own Mobile.Move does the real "is this reachable" check for
+            // free (blocked tiles simply don't move the bot that tick).
+            if (_moveDestination.HasValue)
+            {
+                var dest = _moveDestination.Value;
+
+                if (m_Mobile.X == dest.X && m_Mobile.Y == dest.Y)
+                {
+                    _moveDestination = null;
+                }
+                else
+                {
+                    var moveDir = m_Mobile.GetDirectionTo(dest.X, dest.Y);
+                    m_Mobile.Direction = moveDir;
+                    m_Mobile.Move(moveDir);
+                    return true;
+                }
             }
 
             if (FollowTarget != null && !FollowTarget.Deleted && FollowTarget.Map == m_Mobile.Map &&
@@ -185,14 +230,108 @@ namespace Server.Custom.AIAgents
                         break;
 
                     case "follow":
-                        FollowTarget = FindNearbyMobileByName(action.Target);
+                        {
+                            // #59 fix: an unresolvable target is a no-op, not a
+                            // silent FollowTarget = null. The bug this closes:
+                            // {"type":"follow","target":"Garrett"} when Garrett
+                            // isn't nearby used to cancel an existing follow.
+                            var resolved = ActionValidator.ResolveTarget(action.Target, NearbyMobileCandidates());
+                            if (resolved != null)
+                            {
+                                FollowTarget = resolved;
+                            }
+                            else
+                            {
+                                ActionMetrics.RecordRejection("follow", "target_not_in_range");
+                            }
+                            break;
+                        }
+
+                    case "attack":
+                        {
+                            var resolved = ActionValidator.ResolveTarget(action.Target, NearbyMobileCandidates());
+                            if (resolved != null && resolved.Alive)
+                            {
+                                m_Mobile.Combatant = resolved;
+                            }
+                            else
+                            {
+                                ActionMetrics.RecordRejection("attack", "target_not_in_range");
+                            }
+                            break;
+                        }
+
+                    case "defend":
+                        {
+                            var resolved = ActionValidator.ResolveTarget(action.Target, NearbyMobileCandidates());
+                            if (resolved != null && resolved.Alive)
+                            {
+                                GuardTarget = resolved;
+                            }
+                            else
+                            {
+                                ActionMetrics.RecordRejection("defend", "target_not_in_range");
+                            }
+                            break;
+                        }
+
+                    case "flee":
+                        // Reuses the stock AI's own flee logic (ActionType.Flee
+                        // -> DoActionFlee), the same delegation Think() already
+                        // uses for combat. An explicit order, unconditional -
+                        // unlike the reflexive low-HP flee (issue #57), there's
+                        // no precondition to validate here.
+                        CombatAI.Action = ActionType.Flee;
                         break;
+
+                    case "cast":
+                        if (!TryCastSpell(action.Spell, action.Target))
+                        {
+                            ActionMetrics.RecordRejection("cast", "not_castable_or_target_unresolved");
+                        }
+                        break;
+
+                    case "use_skill":
+                        if (!TryUseSkill(action.Skill, action.Target))
+                        {
+                            ActionMetrics.RecordRejection("use_skill", "not_trained_or_target_unresolved");
+                        }
+                        break;
+
+                    case "equip":
+                        {
+                            var item = FindBackpackItemByName(action.Item);
+                            if (item == null)
+                            {
+                                ActionMetrics.RecordRejection("equip", "not_owned");
+                            }
+                            else if (!m_Mobile.EquipItem(item))
+                            {
+                                // Real-system validation (Item.CanEquip / Mobile.CheckEquip)
+                                // rejected it - wrong layer, slot occupied, etc.
+                                ActionMetrics.RecordRejection("equip", "not_equippable_or_slot_occupied");
+                            }
+                            break;
+                        }
 
                     case "stop":
                         FollowTarget = null;
+                        GuardTarget = null;
+                        _moveDestination = null;
                         break;
 
                     case "move_to":
+                        if (action.X.HasValue && action.Y.HasValue &&
+                            ActionValidator.ValidateMoveTo(m_Mobile.X, m_Mobile.Y, action.X.Value, action.Y.Value))
+                        {
+                            _moveDestination = ((int)action.X.Value, (int)action.Y.Value);
+                        }
+                        else
+                        {
+                            ActionMetrics.RecordRejection("move_to", "unreachable_or_ungrounded");
+                        }
+                        break;
+
                     case "none":
                         break;
 
@@ -391,28 +530,141 @@ namespace Server.Custom.AIAgents
             return nearby;
         }
 
-        private Mobile FindNearbyMobileByName(string name)
+        // Feeds ActionValidator.ResolveTarget (follow/attack/defend): live
+        // mobiles actually in range right now, never the observation's own
+        // `nearby` snapshot (invariant 2 - the snapshot is what the LLM
+        // saw, not what's authoritative at apply time).
+        private IEnumerable<(string Name, Mobile Ref)> NearbyMobileCandidates()
         {
-            if (string.IsNullOrEmpty(name))
-            {
-                return null;
-            }
-
             var eable = m_Mobile.GetMobilesInRange(NearbyRange);
 
             try
             {
                 foreach (var m in eable)
                 {
-                    if (m != m_Mobile && string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase))
+                    if (m != m_Mobile)
                     {
-                        return m;
+                        yield return (m.Name, m);
                     }
                 }
             }
             finally
             {
                 eable.Free();
+            }
+        }
+
+        // Issue #59 `cast`: mirrors BuildCastableSpells' scan (matches on
+        // the spell's display Name, the same value the self-model showed
+        // the LLM - SpellRegistry.NewSpell(string,...) matches on the C#
+        // type name instead, which the LLM was never told). Validity is
+        // ActionValidator.CanCastSpell against BuildCastableSpells' own
+        // output - the same skill+mana-sufficient list issue #58 already
+        // computes from live Mobile state - so cast and the self-model
+        // never disagree about what "castable" means. A second registry
+        // scan then finds that spell by name to build a fresh, castable
+        // Spell instance (the DTOs BuildCastableSpells returns are display
+        // data, not reusable - a Spell is single-use per cast).
+        private bool TryCastSpell(string spellName, string targetName)
+        {
+            if (!ActionValidator.CanCastSpell(spellName, BuildCastableSpells().Select(s => s.Name), m_Mobile.Spell != null))
+            {
+                return false;
+            }
+
+            var types = SpellRegistry.Types;
+
+            for (var id = 0; id < types.Length; id++)
+            {
+                var type = types[id];
+                if (type == null || !typeof(MagerySpell).IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                if (!(SpellRegistry.NewSpell(id, m_Mobile, null) is MagerySpell spell) ||
+                    !string.Equals(spell.Name, spellName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var target = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
+
+                if (!spell.Cast())
+                {
+                    return false;
+                }
+
+                // Stock NPC AI idiom (ThiefAI/PaladinAI/MageAI): a cast spell
+                // opens a Target cursor on the caster; supply it directly
+                // rather than waiting for player input. Falls back to self
+                // when no target resolved - reasonable for buff/heal spells,
+                // and Target.Invoke's own harmful/beneficial flag checks
+                // make an inappropriate self-target a safe no-op rather than
+                // a bad cast.
+                if (m_Mobile.Target != null)
+                {
+                    m_Mobile.Target.Invoke(m_Mobile, (object)target ?? m_Mobile);
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        // Issue #59 `use_skill`: SkillNameAliases (issue #68) resolves
+        // persona-authored display names ("Swordsmanship") to the engine's
+        // SkillName the same way BuildSkills/BuildCastableSpells already do.
+        // Mobile.UseSkill dispatches to the real Server.SkillHandlers table -
+        // whatever validation/targeting that skill needs (or doesn't) is
+        // the engine's own, not reimplemented here.
+        private bool TryUseSkill(string skillName, string targetName)
+        {
+            if (!SkillNameAliases.TryParse(skillName, out var skill))
+            {
+                return false;
+            }
+
+            if (!ActionValidator.CanUseSkill(m_Mobile.Skills[skill].Base))
+            {
+                return false;
+            }
+
+            var target = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
+
+            if (!m_Mobile.UseSkill(skill))
+            {
+                return false;
+            }
+
+            if (m_Mobile.Target != null)
+            {
+                m_Mobile.Target.Invoke(m_Mobile, (object)target ?? m_Mobile);
+            }
+
+            return true;
+        }
+
+        // Issue #59 `equip`: "item owned" - top-level backpack contents only
+        // (matching the naming BuildEquipment already shows the LLM: display
+        // Name, falling back to the type name). Equippability and slot
+        // occupancy are the real Mobile.EquipItem/Item.CanEquip checks
+        // (reuse over reinvention), not duplicated here.
+        private Item FindBackpackItemByName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || m_Mobile.Backpack == null)
+            {
+                return null;
+            }
+
+            foreach (var item in m_Mobile.Backpack.Items)
+            {
+                var itemName = item.Name ?? item.GetType().Name;
+                if (string.Equals(itemName, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item;
+                }
             }
 
             return null;

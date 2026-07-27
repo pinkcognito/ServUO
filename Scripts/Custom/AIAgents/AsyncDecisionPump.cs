@@ -189,6 +189,19 @@ namespace Server.Custom.AIAgents
 
         [JsonPropertyName("z")]
         public double? Z { get; set; }
+
+        // Issue #59 (epic #35 deliverable 3): additive fields for the six
+        // new action types (attack/defend/cast/use_skill/flee/equip). Unknown
+        // fields on older/unrelated action types are simply left null - no
+        // contract break, mirrors how x/y/z sit unused on non-move_to actions.
+        [JsonPropertyName("spell")]
+        public string Spell { get; set; }
+
+        [JsonPropertyName("skill")]
+        public string Skill { get; set; }
+
+        [JsonPropertyName("item")]
+        public string Item { get; set; }
     }
 
     public sealed class DecisionMeta

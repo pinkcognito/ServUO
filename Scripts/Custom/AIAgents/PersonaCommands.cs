@@ -13,6 +13,7 @@ namespace Server.Custom.AIAgents
         {
             CommandSystem.Register("SpawnPersona", AccessLevel.GameMaster, SpawnPersona_OnCommand);
             CommandSystem.Register("DespawnPersona", AccessLevel.GameMaster, DespawnPersona_OnCommand);
+            CommandSystem.Register("PersonaActionStats", AccessLevel.GameMaster, PersonaActionStats_OnCommand);
         }
 
         // Usage: [SpawnPersona <display name or persona_id>
@@ -94,6 +95,29 @@ namespace Server.Custom.AIAgents
             else
             {
                 e.Mobile.SendMessage("No spawned persona found with id '{0}'.", resolution.PersonaId);
+            }
+        }
+
+        // Usage: [PersonaActionStats
+        // Issue #59's closed loop, made visible in-game: how many /decide
+        // action proposals the validator has rejected this server session,
+        // broken down by action type + reason, so rejection rates are
+        // comparable across models once Bedrock returns.
+        private static void PersonaActionStats_OnCommand(CommandEventArgs e)
+        {
+            var snapshot = ActionMetrics.Snapshot();
+
+            if (snapshot.Count == 0)
+            {
+                e.Mobile.SendMessage("No rejected actions recorded this session.");
+                return;
+            }
+
+            e.Mobile.SendMessage("Rejected actions this session ({0} total):", ActionMetrics.TotalRejections);
+
+            foreach (var (actionType, reason, count) in snapshot)
+            {
+                e.Mobile.SendMessage("  {0} ({1}): {2}", actionType, reason, count);
             }
         }
 
