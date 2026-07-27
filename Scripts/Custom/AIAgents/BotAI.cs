@@ -31,6 +31,19 @@ namespace Server.Custom.AIAgents
         public string PersonaId { get; set; }
         public Mobile FollowTarget { get; set; }
 
+        // Issue #62 (epic #35 deliverable 5): opt-in plan-driven behavior.
+        // Null for every existing companion (TestCompanion/PersonaCompanion
+        // never call AssignPlanner) - zero behavior change and zero extra
+        // Think() cost unless a goal is actually assigned, matching "idle
+        // bot = zero /decide calls" for the planning tier too (nothing here
+        // calls /decide either - see PlanExecutor's doc comment).
+        public PlanExecutor PlanExecutor { get; private set; }
+
+        public void AssignPlanner(IPlanner planner, PlanBudget budget = null)
+        {
+            PlanExecutor = new PlanExecutor(this, planner, budget);
+        }
+
         // Issue #59: who this bot is protecting. Not the stock
         // Controlled/ControlMaster guard order - BotAI deliberately stays
         // un-Controlled (see CombatAI's doc comment: Controlled pets never
@@ -164,12 +177,32 @@ namespace Server.Custom.AIAgents
             // CombatAI until it settles back to Wander on its own.
             if (m_Mobile.Combatant != null || CombatAI.Action != ActionType.Wander)
             {
+                // Issue #62: combat pre-empting a running plan is "free" -
+                // Think() never reaches PlanExecutor.Tick() below while this
+                // branch is taken, so the #57 body just takes over exactly
+                // as it already does for follow/moveDestination. This only
+                // records that it happened, so the plan resumes via a fresh
+                // replan (not blindly mid-chain) once combat ends.
+                PlanExecutor?.NotifySalientEvent();
+
                 if (CombatAI.Action == ActionType.Wander)
                 {
                     CombatAI.Action = ActionType.Combat;
                 }
 
                 return CombatAI.Think();
+            }
+
+            // Issue #62: plan-driven execution sits above the ad-hoc
+            // _moveDestination/follow orders below - a bot with an assigned
+            // goal is driven by its plan, not by whatever /decide last said.
+            // Returns false only once the plan tier has nothing left to do
+            // (budget exhausted or the planner is out of orders), at which
+            // point normal FSM below takes over exactly as for a plan-less
+            // bot.
+            if (PlanExecutor != null && PlanExecutor.Tick())
+            {
+                return true;
             }
 
             // Issue #59 `move_to`: a fresh, explicit reposition order
@@ -263,32 +296,18 @@ namespace Server.Custom.AIAgents
                         }
 
                     case "attack":
+                        if (!TryAttackTarget(action.Target))
                         {
-                            var resolved = ActionValidator.ResolveTarget(action.Target, NearbyMobileCandidates());
-                            if (resolved != null && resolved.Alive)
-                            {
-                                m_Mobile.Combatant = resolved;
-                            }
-                            else
-                            {
-                                ActionMetrics.RecordRejection("attack", "target_not_in_range");
-                            }
-                            break;
+                            ActionMetrics.RecordRejection("attack", "target_not_in_range");
                         }
+                        break;
 
                     case "defend":
+                        if (!TryDefendTarget(action.Target))
                         {
-                            var resolved = ActionValidator.ResolveTarget(action.Target, NearbyMobileCandidates());
-                            if (resolved != null && resolved.Alive)
-                            {
-                                GuardTarget = resolved;
-                            }
-                            else
-                            {
-                                ActionMetrics.RecordRejection("defend", "target_not_in_range");
-                            }
-                            break;
+                            ActionMetrics.RecordRejection("defend", "target_not_in_range");
                         }
+                        break;
 
                     case "flee":
                         // Reuses the stock AI's own flee logic (ActionType.Flee
@@ -314,20 +333,11 @@ namespace Server.Custom.AIAgents
                         break;
 
                     case "equip":
+                        if (!TryEquipItem(action.Item, out var equipRejection))
                         {
-                            var item = FindBackpackItemByName(action.Item);
-                            if (item == null)
-                            {
-                                ActionMetrics.RecordRejection("equip", "not_owned");
-                            }
-                            else if (!m_Mobile.EquipItem(item))
-                            {
-                                // Real-system validation (Item.CanEquip / Mobile.CheckEquip)
-                                // rejected it - wrong layer, slot occupied, etc.
-                                ActionMetrics.RecordRejection("equip", "not_equippable_or_slot_occupied");
-                            }
-                            break;
+                            ActionMetrics.RecordRejection("equip", equipRejection);
                         }
+                        break;
 
                     case "stop":
                         FollowTarget = null;
@@ -355,6 +365,386 @@ namespace Server.Custom.AIAgents
                         break;
                 }
             }
+        }
+
+        // Extracted from ApplyActions' "attack" case (issue #62) so
+        // ExecutePlanStep can dispatch through the identical validated path
+        // an ad-hoc /decide action already uses, rather than duplicating it.
+        private bool TryAttackTarget(string targetName)
+        {
+            var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
+            if (resolved == null || !resolved.Alive)
+            {
+                return false;
+            }
+
+            m_Mobile.Combatant = resolved;
+            return true;
+        }
+
+        private bool TryDefendTarget(string targetName)
+        {
+            var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
+            if (resolved == null || !resolved.Alive)
+            {
+                return false;
+            }
+
+            GuardTarget = resolved;
+            return true;
+        }
+
+        private bool TryEquipItem(string itemName, out string rejectionReason)
+        {
+            var item = FindBackpackItemByName(itemName);
+            if (item == null)
+            {
+                rejectionReason = "not_owned";
+                return false;
+            }
+
+            if (!m_Mobile.EquipItem(item))
+            {
+                // Real-system validation (Item.CanEquip / Mobile.CheckEquip)
+                // rejected it - wrong layer, slot occupied, etc.
+                rejectionReason = "not_equippable_or_slot_occupied";
+                return false;
+            }
+
+            rejectionReason = null;
+            return true;
+        }
+
+        // Issue #62: a plan step further than an LLM's own unverified
+        // move_to may reach (ActionValidator.MaxMoveRadius, deliberately
+        // tied to perception range - see its doc comment). A plan
+        // destination is grounded in PlanBeliefs (real game state a planner
+        // reads, never invented), not an LLM's guess, so a much larger
+        // radius is legitimate here.
+        private const double MaxPlanMoveRadius = 200;
+
+        private const int MaxSellBatch = 40;
+
+        // Issue #62 (epic #35 deliverable 5): dispatches one plan step per
+        // call, mirroring ApplyActions' switch so move/combat/skill/equip
+        // steps run through the exact same validated methods an ad-hoc
+        // /decide action already uses - "reuses the #57 body" per the
+        // issue. isFirstTick distinguishes "just started this step" (run
+        // validation) from "still working it" (only move_to is genuinely
+        // multi-tick in this vocabulary).
+        internal PlanStepOutcome ExecutePlanStep(PlanStep step, bool isFirstTick)
+        {
+            switch (step.Type)
+            {
+                case "move_to":
+                    return ExecuteMoveToStep(step, isFirstTick);
+
+                case "mine":
+                    return ExecuteMineStep(step);
+
+                case "sell_to_vendor":
+                    return ExecuteSellStep(step);
+
+                case "buy_from_vendor":
+                    return ExecuteBuyStep(step);
+
+                case "attack":
+                    if (!TryAttackTarget(step.Target))
+                    {
+                        ActionMetrics.RecordRejection("attack", "target_not_in_range");
+                        return PlanStepOutcome.Failed;
+                    }
+                    return PlanStepOutcome.Success;
+
+                case "defend":
+                    if (!TryDefendTarget(step.Target))
+                    {
+                        ActionMetrics.RecordRejection("defend", "target_not_in_range");
+                        return PlanStepOutcome.Failed;
+                    }
+                    return PlanStepOutcome.Success;
+
+                case "cast":
+                    if (!TryCastSpell(step.Spell, step.Target))
+                    {
+                        ActionMetrics.RecordRejection("cast", "not_castable_or_target_unresolved");
+                        return PlanStepOutcome.Failed;
+                    }
+                    return PlanStepOutcome.Success;
+
+                case "use_skill":
+                    if (!TryUseSkill(step.Skill, step.Target))
+                    {
+                        ActionMetrics.RecordRejection("use_skill", "not_trained_or_target_unresolved");
+                        return PlanStepOutcome.Failed;
+                    }
+                    return PlanStepOutcome.Success;
+
+                case "equip":
+                    if (!TryEquipItem(step.Item, out var equipRejection))
+                    {
+                        ActionMetrics.RecordRejection("equip", equipRejection);
+                        return PlanStepOutcome.Failed;
+                    }
+                    return PlanStepOutcome.Success;
+
+                case "flee":
+                    CombatAI.Action = ActionType.Flee;
+                    return PlanStepOutcome.Success;
+
+                case "stop":
+                    FollowTarget = null;
+                    GuardTarget = null;
+                    _moveDestination = null;
+                    return PlanStepOutcome.Success;
+
+                default:
+                    ActionMetrics.RecordRejection(step.Type, "unknown_plan_step_type");
+                    return PlanStepOutcome.Failed;
+            }
+        }
+
+        // Issue #62: read straight off the live Mobile/backpack at replan
+        // time, same anti-hallucination rule issue #58 already applies to
+        // the /decide observation - the planner never sees anything BotAI
+        // didn't just read from the real world.
+        internal PlanBeliefs BuildPlanBeliefs()
+        {
+            return new PlanBeliefs
+            {
+                Gold = CurrentGold,
+                SelfX = m_Mobile.X,
+                SelfY = m_Mobile.Y,
+                SelfZ = m_Mobile.Z,
+            };
+        }
+
+        internal int CurrentGold => m_Mobile.Backpack?.GetAmount(typeof(Gold)) ?? 0;
+
+        // Owns its own tile-stepping (same GetDirectionTo/Move idiom as the
+        // ad-hoc _moveDestination handling in Think()) rather than sharing
+        // that field - keeps plan-driven movement and ad-hoc LLM move_to
+        // orders from being able to stomp on each other's state, at the
+        // cost of a few duplicated lines.
+        private PlanStepOutcome ExecuteMoveToStep(PlanStep step, bool isFirstTick)
+        {
+            if (!step.X.HasValue || !step.Y.HasValue)
+            {
+                ActionMetrics.RecordRejection("move_to", "missing_coordinates");
+                return PlanStepOutcome.Failed;
+            }
+
+            var destX = (int)step.X.Value;
+            var destY = (int)step.Y.Value;
+
+            if (m_Mobile.X == destX && m_Mobile.Y == destY)
+            {
+                return PlanStepOutcome.Success;
+            }
+
+            if (isFirstTick && !ActionValidator.ValidateMoveTo(m_Mobile.X, m_Mobile.Y, destX, destY, MaxPlanMoveRadius))
+            {
+                ActionMetrics.RecordRejection("move_to", "unreachable_or_ungrounded");
+                return PlanStepOutcome.Failed;
+            }
+
+            var moveDir = m_Mobile.GetDirectionTo(destX, destY);
+            m_Mobile.Direction = moveDir;
+            m_Mobile.Move(moveDir);
+            return PlanStepOutcome.InProgress;
+        }
+
+        // Issue #62 `mine`: resolves a PlanResourceNode the same way
+        // follow/attack/defend resolve a Mobile target - against what's
+        // actually nearby right now (invariant 2), never a stale belief.
+        private PlanStepOutcome ExecuteMineStep(PlanStep step)
+        {
+            var node = ActionValidator.ResolveTarget(step.Target, NearbyResourceNodeCandidates());
+
+            if (node == null || !node.TryHarvest(m_Mobile, out var result))
+            {
+                ActionMetrics.RecordRejection("mine", node == null ? "resource_not_in_range" : "resource_depleted_or_untrained");
+                return PlanStepOutcome.Failed;
+            }
+
+            m_Mobile.AddToBackpack(result);
+            return PlanStepOutcome.Success;
+        }
+
+        // Issue #62 `sell_to_vendor`: real gold, real vendor - calls
+        // BaseVendor.OnSellItems directly (the same deterministic
+        // gold-transfer path the client's sell gump ends up calling), not a
+        // hand-rolled price/gold calculation. GetSellInfo().IsSellable is
+        // the same real per-item check the stock sell gump uses to decide
+        // what a vendor will buy.
+        private PlanStepOutcome ExecuteSellStep(PlanStep step)
+        {
+            var vendor = ActionValidator.ResolveTarget(step.Target, NearbyVendorCandidates());
+            if (vendor == null)
+            {
+                ActionMetrics.RecordRejection("sell_to_vendor", "vendor_not_in_range");
+                return PlanStepOutcome.Failed;
+            }
+
+            var sellable = FindSellableBackpackItems(vendor);
+            if (sellable.Count == 0)
+            {
+                ActionMetrics.RecordRejection("sell_to_vendor", "nothing_to_sell");
+                return PlanStepOutcome.Failed;
+            }
+
+            if (!vendor.OnSellItems(m_Mobile, sellable))
+            {
+                ActionMetrics.RecordRejection("sell_to_vendor", "vendor_declined");
+                return PlanStepOutcome.Failed;
+            }
+
+            return PlanStepOutcome.Success;
+        }
+
+        // Issue #62 `buy_from_vendor`: generic vendor-purchase counterpart to
+        // sell_to_vendor, grounded in the vendor's own real stock
+        // (GetBuyInfo) rather than an invented price. Not part of the
+        // concrete John chain (buying a house deed needs a real-estate
+        // vendor + house placement - out of scope for #62), but built and
+        // tested as real infrastructure for when a future goal needs it.
+        private PlanStepOutcome ExecuteBuyStep(PlanStep step)
+        {
+            var vendor = ActionValidator.ResolveTarget(step.Target, NearbyVendorCandidates());
+            if (vendor == null)
+            {
+                ActionMetrics.RecordRejection("buy_from_vendor", "vendor_not_in_range");
+                return PlanStepOutcome.Failed;
+            }
+
+            var buyInfo = FindBuyInfoByName(vendor, step.Item);
+            if (buyInfo == null)
+            {
+                ActionMetrics.RecordRejection("buy_from_vendor", "not_stocked");
+                return PlanStepOutcome.Failed;
+            }
+
+            if (!TryConsumeGold(buyInfo.Price))
+            {
+                ActionMetrics.RecordRejection("buy_from_vendor", "insufficient_gold");
+                return PlanStepOutcome.Failed;
+            }
+
+            var entity = buyInfo.GetEntity();
+            if (entity is Item item)
+            {
+                m_Mobile.AddToBackpack(item);
+            }
+
+            buyInfo.OnBought(m_Mobile, vendor, entity, 1);
+            return PlanStepOutcome.Success;
+        }
+
+        private bool TryConsumeGold(int amount)
+        {
+            return amount > 0 && (m_Mobile.Backpack?.ConsumeTotal(typeof(Gold), amount) ?? false);
+        }
+
+        private IEnumerable<(string Name, PlanResourceNode Ref)> NearbyResourceNodeCandidates()
+        {
+            var eable = m_Mobile.GetItemsInRange(NearbyRange);
+
+            try
+            {
+                foreach (var item in eable)
+                {
+                    if (item is PlanResourceNode node && !node.Deleted)
+                    {
+                        yield return (node.Name, node);
+                    }
+                }
+            }
+            finally
+            {
+                eable.Free();
+            }
+        }
+
+        private IEnumerable<(string Name, BaseVendor Ref)> NearbyVendorCandidates()
+        {
+            var eable = m_Mobile.GetMobilesInRange(NearbyRange);
+
+            try
+            {
+                foreach (var m in eable)
+                {
+                    if (m is BaseVendor vendor)
+                    {
+                        yield return (vendor.Name, vendor);
+                    }
+                }
+            }
+            finally
+            {
+                eable.Free();
+            }
+        }
+
+        private List<SellItemResponse> FindSellableBackpackItems(BaseVendor vendor)
+        {
+            var result = new List<SellItemResponse>();
+
+            if (m_Mobile.Backpack == null)
+            {
+                return result;
+            }
+
+            var info = vendor.GetSellInfo();
+
+            foreach (Item item in m_Mobile.Backpack.Items)
+            {
+                foreach (var ssi in info)
+                {
+                    if (ssi.IsSellable(item))
+                    {
+                        result.Add(new SellItemResponse(item, item.Amount));
+                        break;
+                    }
+                }
+
+                if (result.Count >= MaxSellBatch)
+                {
+                    break;
+                }
+            }
+
+            return result;
+        }
+
+        // Most stock SBInfo tables (e.g. SBMiner) construct GenericBuyInfo
+        // without an explicit display name, in which case .Name is a raw
+        // cliloc-number string, not something a planner could ever cite
+        // (GenericBuyInfo.ctor: falls back to "(1020000 + itemID).ToString()").
+        // Match on the underlying C# type name instead - the same
+        // display-name-or-type-name fallback FindBackpackItemByName already
+        // uses for equip.
+        private static IBuyItemInfo FindBuyInfoByName(BaseVendor vendor, string name)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            foreach (var info in vendor.GetBuyInfo())
+            {
+                if (info is GenericBuyInfo gbi && gbi.Type != null &&
+                    string.Equals(gbi.Type.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return info;
+                }
+
+                if (string.Equals(info.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return info;
+                }
+            }
+
+            return null;
         }
 
         private DecisionRequest BuildDecisionRequest(Mobile speaker, string speech)
