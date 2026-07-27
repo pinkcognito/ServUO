@@ -78,17 +78,15 @@ namespace Server.Custom.AIAgents
                 m_Mobile.Skills[SkillName.Wrestling].Base,
             }.Max();
 
-            if (magery > 0 && magery >= archery && magery >= melee)
+            switch (CombatStanceSelector.SelectStance(magery, archery, melee))
             {
-                return new MageAI(m_Mobile);
+                case CombatStance.Mage:
+                    return new MageAI(m_Mobile);
+                case CombatStance.Archer:
+                    return new ArcherAI(m_Mobile);
+                default:
+                    return new MeleeAI(m_Mobile);
             }
-
-            if (archery > 0 && archery >= melee)
-            {
-                return new ArcherAI(m_Mobile);
-            }
-
-            return new MeleeAI(m_Mobile);
         }
 
         public override bool HandlesOnSpeech(Mobile from)
