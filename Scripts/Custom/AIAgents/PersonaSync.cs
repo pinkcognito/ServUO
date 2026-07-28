@@ -454,5 +454,14 @@ namespace Server.Custom.AIAgents
             Despawn(personaId);
             return true;
         }
+
+        // Issue #65: read-only lookup for [PersonaBondStatus - the GM
+        // command needs the live PersonaCompanion instance (AffinityScore/
+        // LootOwed/ControlMaster), not just the resolved id ResolveSpawned
+        // already returns.
+        public static PersonaCompanion FindSpawned(string personaId)
+        {
+            return personaId != null && _spawned.TryGetValue(personaId, out var companion) ? companion : null;
+        }
     }
 }
