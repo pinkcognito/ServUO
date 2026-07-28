@@ -191,14 +191,12 @@ namespace Server.Custom.AIAgents
                 return;
             }
 
-            var now = DateTime.UtcNow;
-            if (CompanionBond.IsRateLimited(companion.LastNegativeBondDeltaUtc, now, LootShareCalculator.RateLimitCooldown))
-            {
-                return;
-            }
-
-            ApplyBondDelta(companion, LootShareCalculator.LootShortedBondPenalty, "loot_shorted");
-            companion.LastNegativeBondDeltaUtc = now;
+            TryApplyBondDelta(
+                companion,
+                LootShareCalculator.LootShortedBondPenalty,
+                CompanionBond.MaxDeltaMagnitude,
+                "loot_shorted",
+                LootShareCalculator.RateLimitCooldown);
         }
 
         private static void SettleLootShare(PersonaCompanion companion, int paymentAmount)
@@ -209,24 +207,60 @@ namespace Server.Custom.AIAgents
             if (settled <= 0)
             {
                 // Nothing owed - a plain gift with no debt to absorb it.
-                // Generic "gifts raise bond" is #39's broader scope, not
-                // this issue's loot-share mechanic (see class doc comment).
+                // Issue #39 broadens this from a no-op into its own bond
+                // input (CompanionBondBehavior.ReasonGift) - the owner
+                // handed over gold with nothing riding on it, which is
+                // exactly the "gifts... from the owner" positive that
+                // issue's scope calls for.
+                TryApplyBondDelta(
+                    companion,
+                    CompanionBondBehavior.GiftBondBonus,
+                    CompanionBondBehavior.MaxDeltaMagnitude,
+                    CompanionBondBehavior.ReasonGift,
+                    CompanionBondBehavior.DeliberateActRateLimitCooldown);
                 return;
             }
 
-            var now = DateTime.UtcNow;
-            if (CompanionBond.IsRateLimited(companion.LastPositiveBondDeltaUtc, now, LootShareCalculator.RateLimitCooldown))
-            {
-                return;
-            }
-
-            ApplyBondDelta(companion, LootShareCalculator.LootShareBondBonus, "loot_shared");
-            companion.LastPositiveBondDeltaUtc = now;
+            TryApplyBondDelta(
+                companion,
+                LootShareCalculator.LootShareBondBonus,
+                CompanionBond.MaxDeltaMagnitude,
+                "loot_shared",
+                LootShareCalculator.RateLimitCooldown);
         }
 
-        private static void ApplyBondDelta(PersonaCompanion companion, int rawDelta, string reason)
+        // Issue #39: the single clamp+apply+metrics+log step #65 already
+        // built (ApplyBondDelta below), now paired with the rate-limit
+        // check/mark it always needs - one entry point every bond-delta
+        // source in this file *and* CompanionBondBehaviors.cs shares,
+        // rather than each caller re-deriving the same
+        // "check IsRateLimited, apply, stamp the timestamp" sequence
+        // ProcessAssistedKill/SettleLootShare used to duplicate inline.
+        // maxMagnitude is caller-supplied (not hardcoded to
+        // CompanionBond.MaxDeltaMagnitude) because that constant is scoped
+        // to #65's own loot-share inputs specifically - #39's behavior
+        // inputs clamp through CompanionBondBehavior.MaxDeltaMagnitude
+        // instead (see that class's doc comment). Returns false when
+        // rate-limited so a caller can distinguish "applied" from
+        // "suppressed" if it ever needs to (no current caller does).
+        internal static bool TryApplyBondDelta(
+            PersonaCompanion companion, int rawDelta, int maxMagnitude, string reason, TimeSpan cooldown)
         {
-            var clamped = CompanionBond.ClampDelta(rawDelta, CompanionBond.MaxDeltaMagnitude);
+            var now = DateTime.UtcNow;
+
+            if (CompanionBond.IsRateLimited(companion.LastBondDeltaUtcByReason, reason, now, cooldown))
+            {
+                return false;
+            }
+
+            ApplyBondDelta(companion, rawDelta, maxMagnitude, reason);
+            companion.LastBondDeltaUtcByReason[reason] = now;
+            return true;
+        }
+
+        private static void ApplyBondDelta(PersonaCompanion companion, int rawDelta, int maxMagnitude, string reason)
+        {
+            var clamped = CompanionBond.ClampDelta(rawDelta, maxMagnitude);
             companion.AffinityScore = CompanionBond.ClampScore(companion.AffinityScore + clamped);
 
             CompanionBondMetrics.Record(reason, clamped);

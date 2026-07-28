@@ -1,19 +1,22 @@
 using System;
+using System.Collections.Generic;
 
 namespace Server.Custom.AIAgents
 {
     // Issue #65 (resolves epic #35 decision 2 / the deterministic half of
-    // #39): a minimal, Mobile-free bond primitive. #39 ("Persona companions:
-    // earned-bond / affinity system") owns the full per-(companion, player)
-    // score - persisted via a sidecar-backed store, with weighted
-    // multi-source deltas (gifts, defending, time together, abuse) - and is
-    // still open. What #65 actually needs *now* is (a) a seed value to set
-    // at recruitment and (b) bounded/rate-limited deltas for the loot-share
-    // economy in this same issue, so this class only builds that much: tier
-    // thresholds + clamping. #39, when it lands, is expected to either
-    // subsume this or grow around it (see CompanionEconomy.cs's doc comment)
-    // - deliberately kept tiny and pure so nothing here has to be thrown
-    // away.
+    // #39): a minimal, Mobile-free bond primitive - tier thresholds +
+    // clamping, seeded at recruitment, moved by #65's own loot-share input.
+    //
+    // Issue #39 ("Persona companions: earned-bond / affinity system",
+    // reconciled 2026-07-28 after #65 merged) extends this rather than
+    // rebuilding it: the full weighted set of owner-behavior inputs
+    // (gifts, defend, heal, time-together, attack/steal/abandon) lives in
+    // CompanionBondBehavior (weights/reasons, pure) and CompanionBondBehaviors
+    // (the Mobile/World glue, mirrors CompanionEconomy.cs) - both layered on
+    // top of GetTier/ClampScore/ClampDelta/IsRateLimited here, unchanged.
+    // The one addition in this file is the dictionary-keyed IsRateLimited
+    // overload below, generalizing the single-DateTime version to #39's
+    // many behavior sources.
     //
     // Pure and Mobile/World-free by design, like ActionValidator (#59) and
     // CombatStanceSelector (#68) - directly unit-testable without booting a
@@ -84,6 +87,18 @@ namespace Server.Custom.AIAgents
         public static bool IsRateLimited(DateTime lastAppliedUtc, DateTime nowUtc, TimeSpan cooldown)
         {
             return (nowUtc - lastAppliedUtc) < cooldown;
+        }
+
+        // Issue #39: generalizes the single-source rate limit above to the
+        // full set of behavior inputs (CompanionBondBehavior) without
+        // growing PersonaCompanion by one DateTime field per new source -
+        // callers key a single in-memory dictionary by reason string
+        // instead (see PersonaCompanion.LastBondDeltaUtcByReason). Still
+        // pure/Mobile-free: this only reads the dictionary passed to it.
+        public static bool IsRateLimited(
+            IDictionary<string, DateTime> lastAppliedUtcByReason, string reason, DateTime nowUtc, TimeSpan cooldown)
+        {
+            return lastAppliedUtcByReason.TryGetValue(reason, out var last) && IsRateLimited(last, nowUtc, cooldown);
         }
     }
 }
