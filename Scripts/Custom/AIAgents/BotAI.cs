@@ -204,29 +204,24 @@ namespace Server.Custom.AIAgents
                 return false;
             }
 
-            // Issue #38: dismissed is dormant in place - no movement, no
-            // combat engagement, no follow, no plan ticks (goal or
-            // otherwise). Returns true (not false) so the AI timer keeps
-            // running cheaply: AITimer.OnTick stops the timer outright when
-            // Think() returns false, and nothing currently re-arms it, so a
-            // dismissed companion re-summoned later would otherwise never
-            // think again.
-            if (Presence == CompanionPresence.Dismissed)
-            {
-                return true;
-            }
-
             if (!ShouldFullThink())
             {
                 return true;
             }
 
-            // Issue #59 `defend`: if the bot isn't already fighting, and its
-            // GuardTarget is, engage whoever the GuardTarget is fighting.
-            // A heuristic ("GuardTarget.Combatant" is whoever last engaged
-            // it, not a full threat table) but it's real live game state,
-            // never the observation's claim (invariant 2).
-            if (m_Mobile.Combatant == null && GuardTarget != null && !GuardTarget.Deleted && GuardTarget.Alive &&
+            // Issue #59 `defend` / issue #38: if the bot isn't already
+            // fighting, and its GuardTarget is, engage whoever the
+            // GuardTarget is fighting. A heuristic ("GuardTarget.Combatant"
+            // is whoever last engaged it, not a full threat table) but it's
+            // real live game state, never the observation's claim
+            // (invariant 2). Active-only per the #38 design correction: a
+            // dismissed companion defends ITSELF (below, via the reflexive
+            // Combatant the engine's own BaseCreature.AggressiveAction
+            // already sets on it when attacked), not an ally it happens to
+            // be guarding - proactively wading into someone else's fight
+            // is exactly the "proactive behavior" dismissal suppresses.
+            if (Presence == CompanionPresence.Active &&
+                m_Mobile.Combatant == null && GuardTarget != null && !GuardTarget.Deleted && GuardTarget.Alive &&
                 GuardTarget.Map == m_Mobile.Map && GuardTarget.Combatant != null && GuardTarget.Combatant.Alive)
             {
                 m_Mobile.Combatant = GuardTarget.Combatant;
@@ -236,7 +231,12 @@ namespace Server.Custom.AIAgents
             // companion that keeps walking at its friend while being hit
             // is not "fighting back" (acceptance: attack it -> it fights
             // back). Once engaged (combat/guard/flee), stay delegated to
-            // CombatAI until it settles back to Wander on its own.
+            // CombatAI until it settles back to Wander on its own. This
+            // runs regardless of Presence (issue #38 design correction): a
+            // dismissed companion that gets attacked still fully defends
+            // itself - swings, flees when low, casts if able - via the
+            // exact same CombatAI delegation an active companion uses.
+            // Dismissal only suppresses what comes AFTER this block.
             if (m_Mobile.Combatant != null || CombatAI.Action != ActionType.Wander)
             {
                 // Issue #62: combat pre-empting a running plan is "free" -
@@ -253,6 +253,21 @@ namespace Server.Custom.AIAgents
                 }
 
                 return CombatAI.Think();
+            }
+
+            // Issue #38 (design correction): dismissed is dormant only once
+            // there's nothing left to fight - reached here means Combatant
+            // was null and CombatAI had already settled back to Wander, so
+            // self-defense (above) never engaged, or just ended. No
+            // wander, no follow, no plan ticks, no /decide-triggering
+            // behavior. Returns true (not false) so the AI timer keeps
+            // running cheaply: AITimer.OnTick stops the timer outright when
+            // Think() returns false, and nothing currently re-arms it, so a
+            // dismissed companion re-summoned later would otherwise never
+            // think again.
+            if (Presence == CompanionPresence.Dismissed)
+            {
+                return true;
             }
 
             // Issue #62: plan-driven execution sits above the ad-hoc
@@ -325,6 +340,20 @@ namespace Server.Custom.AIAgents
             {
                 switch (action.Type)
                 {
+                    // Issue #38 review fix: a decision can be in flight
+                    // (enqueued while Active) when the player dismisses the
+                    // companion before it drains - without this check the
+                    // stale decision could still Say/re-set FollowTarget on
+                    // an already-dormant companion. Gated only on these
+                    // proactive/conversational actions, not combat ones -
+                    // self-defense stays available while dismissed (see
+                    // Think()'s combat-priority block), so there's no
+                    // reason to suppress attack/defend/flee/cast/use_skill
+                    // here even from a stale decision.
+                    case "say" when Presence == CompanionPresence.Dismissed:
+                        ActionMetrics.RecordRejection("say", "dismissed");
+                        break;
+
                     case "say":
                         if (!string.IsNullOrWhiteSpace(action.Text))
                         {
@@ -332,11 +361,19 @@ namespace Server.Custom.AIAgents
                         }
                         break;
 
+                    case "emote" when Presence == CompanionPresence.Dismissed:
+                        ActionMetrics.RecordRejection("emote", "dismissed");
+                        break;
+
                     case "emote":
                         if (!string.IsNullOrWhiteSpace(action.Text))
                         {
                             m_Mobile.Emote(action.Text);
                         }
+                        break;
+
+                    case "follow" when Presence == CompanionPresence.Dismissed:
+                        ActionMetrics.RecordRejection("follow", "dismissed");
                         break;
 
                     case "follow":
