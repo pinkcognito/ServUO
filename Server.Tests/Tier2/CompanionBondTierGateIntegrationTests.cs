@@ -183,15 +183,21 @@ public class CompanionBondTierGateIntegrationTests : IClassFixture<CompanionWorl
     }
 
     // Issue #39 correction (owner review on PR #16, 2026-07-28): defend has
-    // no bond-tier gate - even a companion at Stranger (the floor, well
-    // below every named tier) must still obey a defend order. Combat
-    // compliance is #63's future numeric job, not a hard gate here.
+    // no bond-*tier* gate (no Friend/Bonded threshold to clear) - superseded
+    // by issue #63's numeric compliance roll, which reads bond/loyalty as a
+    // continuous input instead. The two tests below replace the old
+    // "always works" lock-in: a companion still defends readily against a
+    // target it can handle, but a badly outmatched order (against a
+    // default-strength CreateAttacker, str=500, next to a fresh companion's
+    // Swordsmanship 88) now fails its morale check and flees rather than
+    // wading in - "obeys combat orders by default" no longer means
+    // "unconditionally."
     [Fact]
-    public void Defend_WorksRegardlessOfBondTier()
+    public void Defend_Complies_WhenCompanionCanHandleTheTarget()
     {
         var companion = _fixture.CreateCompanion(new Point3D(40, 10, 0), MeleeSkills);
         var owner = _fixture.CreateAttacker(new Point3D(41, 10, 0));
-        var threat = _fixture.CreateAttacker(new Point3D(45, 10, 0));
+        var threat = _fixture.CreateAttacker(new Point3D(45, 10, 0), str: 1);
         threat.Name = "Threat";
 
         try
@@ -202,12 +208,52 @@ public class CompanionBondTierGateIntegrationTests : IClassFixture<CompanionWorl
             var botAi = (BotAI)companion.AIObject;
             Assert.Equal(CompanionBond.Tier.Stranger, companion.AffinityTier);
 
+            // Deterministic: with a target this weak, effective morale is
+            // comfortably positive, and a roll of 7 (2d6's own average)
+            // holds it. See ReactionResolveTests for the pure-function
+            // coverage of every roll/margin.
+            botAi.DebugDiceRoller = new FixedDiceRoller(7);
+
             botAi.ApplyActions(new List<DecisionAction>
             {
                 new DecisionAction { Type = "defend", Target = threat.Name },
             });
 
             Assert.Equal(threat, botAi.GuardTarget);
+        }
+        finally
+        {
+            companion.Delete();
+            owner.Delete();
+            threat.Delete();
+        }
+    }
+
+    [Fact]
+    public void Defend_Refuses_WhenBadlyOutmatched()
+    {
+        var companion = _fixture.CreateCompanion(new Point3D(42, 10, 0), MeleeSkills);
+        var owner = _fixture.CreateAttacker(new Point3D(43, 10, 0));
+        // CreateAttacker's default str=500 is far beyond this companion's
+        // reach (100 hp, Swordsmanship 88) - effective morale lands well
+        // below zero, so this fails on every possible 2d6 roll (2-12); no
+        // DebugDiceRoller override needed to make the assertion reliable.
+        var threat = _fixture.CreateAttacker(new Point3D(46, 10, 0));
+        threat.Name = "ToughThreat";
+
+        try
+        {
+            companion.ControlMaster = owner;
+            companion.AffinityScore = CompanionBond.MinScore;
+
+            var botAi = (BotAI)companion.AIObject;
+
+            botAi.ApplyActions(new List<DecisionAction>
+            {
+                new DecisionAction { Type = "defend", Target = threat.Name },
+            });
+
+            Assert.Null(botAi.GuardTarget);
         }
         finally
         {
