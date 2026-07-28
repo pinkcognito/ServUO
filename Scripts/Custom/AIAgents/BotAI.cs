@@ -52,6 +52,52 @@ namespace Server.Custom.AIAgents
         // set-Combatant-and-let-CombatAI-fight pattern `attack` uses below.
         public Mobile GuardTarget { get; set; }
 
+        // Issue #38: player-facing presence toggle (SummonCompanion /
+        // DismissCompanion, PersonaPlayerCommands.cs), mirroring the GM
+        // [SpawnPersona/[DespawnPersona pattern but scoped to a companion
+        // the player owns (ControlMaster). Defaults to Active so every
+        // existing GM-/auto-spawned companion (no ControlMaster, never
+        // touched by these commands) behaves exactly as before this issue -
+        // Dismissed only ever happens via an explicit player command.
+        // Serialized on the owning BaseCreature like BotId/PersonaId
+        // (PersonaCompanion.cs, TestCompanion.cs).
+        public CompanionPresence Presence { get; set; } = CompanionPresence.Active;
+
+        // Issue #38: the only mutator for Presence - going Dismissed also
+        // drops any standing order (follow/guard/move), the same clear
+        // ApplyActions' "stop" case already does, so a re-summoned
+        // companion doesn't resume a stale order from before it went
+        // dormant. Going Active does NOT set FollowTarget itself - the
+        // caller (SummonCompanion) decides what "accompanies" means at the
+        // point of summon.
+        public void SetPresence(CompanionPresence presence)
+        {
+            Presence = presence;
+
+            if (presence == CompanionPresence.Dismissed)
+            {
+                FollowTarget = null;
+                GuardTarget = null;
+                _moveDestination = null;
+            }
+        }
+
+        // Issue #38: the one live seam that composes TogetherEvaluator's
+        // pure rule with real Mobile state (owner online-ness, distance) -
+        // "define together concretely" per the design doc. Not consumed by
+        // anything in this PR (the #40 goal-tick trigger and the epic #35
+        // deliverable 4 activity governor are both still open); exposed now
+        // so the definition has exactly one place to live rather than being
+        // redecided by each future consumer.
+        public bool IsTogetherWithOwner(double? maxRange = null)
+        {
+            var owner = m_Mobile.ControlMaster;
+            var ownerOnline = owner?.NetState != null;
+            double? distance = owner != null ? m_Mobile.GetDistanceToSqrt(owner) : (double?)null;
+
+            return TogetherEvaluator.IsTogether(Presence, ownerOnline, distance, maxRange);
+        }
+
         public BotAI(BaseCreature m)
             : base(m)
         {
@@ -130,7 +176,11 @@ namespace Server.Custom.AIAgents
 
         public override bool HandlesOnSpeech(Mobile from)
         {
-            return from.Alive && from.InRange(m_Mobile.Location, m_Mobile.RangePerception);
+            // Issue #38: dismissed is dormant - zero /decide calls, not
+            // just zero actions. Gating here (rather than inside OnSpeech)
+            // means OnSpeech is never even invoked while dismissed.
+            return Presence == CompanionPresence.Active &&
+                   from.Alive && from.InRange(m_Mobile.Location, m_Mobile.RangePerception);
         }
 
         public override void OnSpeech(SpeechEventArgs e)
@@ -152,6 +202,18 @@ namespace Server.Custom.AIAgents
             if (m_Mobile.Deleted)
             {
                 return false;
+            }
+
+            // Issue #38: dismissed is dormant in place - no movement, no
+            // combat engagement, no follow, no plan ticks (goal or
+            // otherwise). Returns true (not false) so the AI timer keeps
+            // running cheaply: AITimer.OnTick stops the timer outright when
+            // Think() returns false, and nothing currently re-arms it, so a
+            // dismissed companion re-summoned later would otherwise never
+            // think again.
+            if (Presence == CompanionPresence.Dismissed)
+            {
+                return true;
             }
 
             if (!ShouldFullThink())
