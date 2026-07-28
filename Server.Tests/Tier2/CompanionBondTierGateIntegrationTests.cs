@@ -6,19 +6,26 @@ using Server.Mobiles;
 namespace Server.Tests.Tier2;
 
 // Issue #39: headless coverage for the tier-gate wiring (Acquaintance->chat,
-// Friend->follow, Bonded->defend), the §11 bonded-awake-exception predicate,
-// and the direct Mobile-touching behavior hooks (OnAttackedBy/OnHealedBy)
-// that Tier 1's pure tests (CompanionBondTests, CompanionBondBehaviorTests)
-// can't reach because they need a real Mobile/BotAI/ControlMaster
-// relationship. Mirrors CompanionCombatIntegrationTests' (#68) and
+// Friend->follow), the §11 bonded-awake-exception predicate, and the direct
+// Mobile-touching behavior hooks (OnAttackedBy/OnHealedBy/co-combat) that
+// Tier 1's pure tests (CompanionBondTests, CompanionBondBehaviorTests) can't
+// reach because they need a real Mobile/BotAI/ControlMaster relationship.
+// Mirrors CompanionCombatIntegrationTests' (#68) and
 // CompanionPresenceIntegrationTests' (#38) shape.
+//
+// Corrected 2026-07-28 (owner review on PR #16): defend/attack are NOT
+// bond-tier gated - a recruited companion (quest-gated, sharing in loot)
+// obeys combat orders by default; bond x risk x reward compliance is #63
+// Reaction & Resolve's numeric job, not built yet. Defend_WorksRegardlessOfBondTier
+// below locks that in; the old Bonded-gate rejection/acceptance tests are
+// gone.
 //
 // A plain BaseCreature (CompanionWorldFixture.CreateAttacker) stands in for
 // the recruiting owner throughout: every check this issue wires
-// (BotAI.MeetsBondTier, OnAttackedBy, OnHealedBy) only ever compares
-// companion.ControlMaster by Mobile reference equality, never anything
-// PlayerMobile-specific - and constructing a real PlayerMobile is out of
-// this fixture's reach (CompanionWorldFixture's own doc comment: no
+// (BotAI.MeetsBondTier, OnAttackedBy, OnHealedBy, co-combat) only ever
+// compares companion.ControlMaster by Mobile reference equality, never
+// anything PlayerMobile-specific - and constructing a real PlayerMobile is
+// out of this fixture's reach (CompanionWorldFixture's own doc comment: no
 // Server.Items.* construction, which a real player's starting equipment
 // would need).
 //
@@ -175,8 +182,12 @@ public class CompanionBondTierGateIntegrationTests : IClassFixture<CompanionWorl
         }
     }
 
+    // Issue #39 correction (owner review on PR #16, 2026-07-28): defend has
+    // no bond-tier gate - even a companion at Stranger (the floor, well
+    // below every named tier) must still obey a defend order. Combat
+    // compliance is #63's future numeric job, not a hard gate here.
     [Fact]
-    public void Defend_RejectedBelowBondedTier()
+    public void Defend_WorksRegardlessOfBondTier()
     {
         var companion = _fixture.CreateCompanion(new Point3D(40, 10, 0), MeleeSkills);
         var owner = _fixture.CreateAttacker(new Point3D(41, 10, 0));
@@ -186,15 +197,50 @@ public class CompanionBondTierGateIntegrationTests : IClassFixture<CompanionWorl
         try
         {
             companion.ControlMaster = owner;
-            companion.AffinityScore = CompanionBond.BondedThreshold - 1;
+            companion.AffinityScore = CompanionBond.MinScore;
 
             var botAi = (BotAI)companion.AIObject;
+            Assert.Equal(CompanionBond.Tier.Stranger, companion.AffinityTier);
+
             botAi.ApplyActions(new List<DecisionAction>
             {
                 new DecisionAction { Type = "defend", Target = threat.Name },
             });
 
-            Assert.Null(botAi.GuardTarget);
+            Assert.Equal(threat, botAi.GuardTarget);
+        }
+        finally
+        {
+            companion.Delete();
+            owner.Delete();
+            threat.Delete();
+        }
+    }
+
+    // Issue #39 correction: the new co-combat input - "the companion
+    // fighting/defending alongside its owner... raises bond," the
+    // reciprocal of OnHealedBy/OnAttackedBy. Populates real DamageEntries
+    // via Mobile.RegisterDamage (no Item/Corpse involved, unlike a full
+    // Mobile.Kill()) and invokes the OnKilledBy handler directly - see that
+    // handler's own doc comment (CompanionBondBehaviors.cs) for why.
+    [Fact]
+    public void OnKilledByCoCombatCheck_BothOwnerAndCompanionFoughtRaisesBondScore()
+    {
+        var companion = _fixture.CreateCompanion(new Point3D(50, 10, 0), MeleeSkills);
+        var owner = _fixture.CreateAttacker(new Point3D(51, 10, 0));
+        var threat = _fixture.CreateAttacker(new Point3D(55, 10, 0));
+
+        try
+        {
+            companion.ControlMaster = owner;
+            companion.AffinityScore = CompanionBond.AcquaintanceThreshold;
+
+            threat.RegisterDamage(10, owner);
+            threat.RegisterDamage(10, companion);
+
+            CompanionBondBehaviors.OnKilledByCoCombatCheck(new OnKilledByEventArgs(threat, owner));
+
+            Assert.True(companion.AffinityScore > CompanionBond.AcquaintanceThreshold);
         }
         finally
         {
@@ -205,25 +251,25 @@ public class CompanionBondTierGateIntegrationTests : IClassFixture<CompanionWorl
     }
 
     [Fact]
-    public void Defend_AcceptedAtBondedTier()
+    public void OnKilledByCoCombatCheck_CompanionAloneDoesNotMoveBondScore()
     {
-        var companion = _fixture.CreateCompanion(new Point3D(50, 10, 0), MeleeSkills);
-        var owner = _fixture.CreateAttacker(new Point3D(51, 10, 0));
-        var threat = _fixture.CreateAttacker(new Point3D(55, 10, 0));
-        threat.Name = "Threat";
+        // The owner never fought this threat - only the companion did (e.g.
+        // it wandered off and picked its own fight) - not co-combat, no
+        // bond effect either way.
+        var companion = _fixture.CreateCompanion(new Point3D(56, 10, 0), MeleeSkills);
+        var owner = _fixture.CreateAttacker(new Point3D(57, 10, 0));
+        var threat = _fixture.CreateAttacker(new Point3D(60, 10, 0));
 
         try
         {
             companion.ControlMaster = owner;
-            companion.AffinityScore = CompanionBond.BondedThreshold;
+            companion.AffinityScore = CompanionBond.AcquaintanceThreshold;
 
-            var botAi = (BotAI)companion.AIObject;
-            botAi.ApplyActions(new List<DecisionAction>
-            {
-                new DecisionAction { Type = "defend", Target = threat.Name },
-            });
+            threat.RegisterDamage(10, companion);
 
-            Assert.Equal(threat, botAi.GuardTarget);
+            CompanionBondBehaviors.OnKilledByCoCombatCheck(new OnKilledByEventArgs(threat, owner));
+
+            Assert.Equal(CompanionBond.AcquaintanceThreshold, companion.AffinityScore);
         }
         finally
         {

@@ -15,7 +15,7 @@ namespace Server.Tests
         {
             // "gifts/defending >> idle proximity" (issue #39 scope).
             Assert.True(CompanionBondBehavior.GiftBondBonus > CompanionBondBehavior.TimeTogetherBondBonus * 5);
-            Assert.True(CompanionBondBehavior.DefendBondBonus > CompanionBondBehavior.TimeTogetherBondBonus * 5);
+            Assert.True(CompanionBondBehavior.CoCombatBondBonus > CompanionBondBehavior.TimeTogetherBondBonus * 5);
             Assert.True(CompanionBondBehavior.HealBondBonus > CompanionBondBehavior.TimeTogetherBondBonus * 5);
         }
 
@@ -29,7 +29,7 @@ namespace Server.Tests
         {
             foreach (var weight in new[]
                      {
-                         PositiveGift, PositiveDefend, PositiveHeal, PositiveTimeTogether,
+                         PositiveGift, PositiveCoCombat, PositiveHeal, PositiveTimeTogether,
                          NegativeAttacked, NegativeStolen, NegativeAbandoned,
                      })
             {
@@ -68,7 +68,7 @@ namespace Server.Tests
         }
 
         private const int PositiveGift = CompanionBondBehavior.GiftBondBonus;
-        private const int PositiveDefend = CompanionBondBehavior.DefendBondBonus;
+        private const int PositiveCoCombat = CompanionBondBehavior.CoCombatBondBonus;
         private const int PositiveHeal = CompanionBondBehavior.HealBondBonus;
         private const int PositiveTimeTogether = CompanionBondBehavior.TimeTogetherBondBonus;
         private const int NegativeAttacked = CompanionBondBehavior.AttackedByOwnerBondPenalty;

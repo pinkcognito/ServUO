@@ -20,7 +20,16 @@ namespace Server.Custom.AIAgents
     public static class CompanionBondBehavior
     {
         public const string ReasonGift = "gift";
-        public const string ReasonDefend = "defend";
+
+        // Issue #39 correction (owner review on PR #16, 2026-07-28): renamed
+        // from "defend" to "co_combat" - the detection (mutual DamageEntries
+        // membership on a kill, CompanionBondBehaviors.OnKilledByCoCombatCheck)
+        // is inherently bidirectional and never checked *who* was the
+        // original target, so "the owner defended the companion" was always
+        // only half the story. This is the fighting-alongside-your-owner
+        // input: owner defends companion, companion defends owner, or both
+        // just fought the same threat together - one signal, one reason key.
+        public const string ReasonCoCombat = "co_combat";
         public const string ReasonHeal = "heal";
         public const string ReasonTimeTogether = "time_together";
         public const string ReasonAttackedByOwner = "attacked_by_owner";
@@ -41,14 +50,14 @@ namespace Server.Custom.AIAgents
         public const int MaxDeltaMagnitude = 30;
 
         // Weighted per the issue text ("gifts/defending >> idle proximity"):
-        // a deliberate, noticed act (gift/defend/heal) is worth an order of
-        // magnitude more per application than the ambient time-together
+        // a deliberate, noticed act (gift/co-combat/heal) is worth an order
+        // of magnitude more per application than the ambient time-together
         // trickle - the difference is the per-application weight, not the
         // clamp ceiling (both share MaxDeltaMagnitude; IsRateLimited is what
         // keeps a frequent, low-value source from adding up faster than a
         // rare, high-value one).
         public const int GiftBondBonus = 20;
-        public const int DefendBondBonus = 25;
+        public const int CoCombatBondBonus = 25;
         public const int HealBondBonus = 20;
         public const int TimeTogetherBondBonus = 2;
 
@@ -56,8 +65,8 @@ namespace Server.Custom.AIAgents
         public const int StolenFromByOwnerBondPenalty = -25;
         public const int AbandonedBondPenalty = -10;
 
-        // Deliberate, discrete owner acts (gift/defend/heal/attack/steal)
-        // share loot-share's own anti-gaming cooldown
+        // Deliberate, discrete owner/companion acts (gift/co-combat/heal/
+        // attack/steal) share loot-share's own anti-gaming cooldown
         // (LootShareCalculator.RateLimitCooldown, 2 minutes) - a player
         // shouldn't be able to farm bond, or tank it, any faster than the
         // existing #65 economy input already allows.

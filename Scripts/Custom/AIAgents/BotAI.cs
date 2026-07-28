@@ -120,18 +120,29 @@ namespace Server.Custom.AIAgents
             return TogetherEvaluator.IsTogether(Presence, ownerOnline, distance, maxRange);
         }
 
-        // Issue #39: "wire the tier GATES" - Acquaintance->chat,
-        // Friend->follow, Bonded->defend. A companion with no ControlMaster
-        // (not yet recruited, or a GM-/TestCompanion-spawned bot the bond
-        // system never touches) is exempt - #65's own framing is "an
+        // Issue #39, corrected 2026-07-28 (owner review on PR #16): the
+        // tier gates are Acquaintance->chat and Friend->follow only.
+        // Combat (attack/defend) is deliberately NOT gated on bond tier - a
+        // companion is recruited through a quest and shares in loot (#65),
+        // so it obeys combat orders by default; bond x risk x reward
+        // compliance is #63 Reaction & Resolve's numeric job (a roll,
+        // never a hard tier gate), not yet built. Bond stays an *input*
+        // #63 will read (AffinityScore/GetTier, unchanged), just not a
+        // precondition for defend/attack here.
+        //
+        // A companion with no ControlMaster (not yet recruited, or a
+        // GM-/TestCompanion-spawned bot the bond system never touches) is
+        // exempt from the two gates that remain - #65's own framing is "an
         // ordinary (possibly conversational) NPC" pre-recruitment, and
         // gating pre-existing GM/test bots that never had a bond score
         // would be a behavior regression on #57/#59's own acceptance tests.
-        // Once recruited, the gate is real: recruitment seeds Friend (>=
-        // both Acquaintance and Friend) so it never blocks anything at the
-        // moment of recruitment, but a bond that later decays (repeated
-        // attack/steal/abandon) can fall back below a gate and the
-        // companion stops complying until it's earned back.
+        // Recruitment seeds Friend (>= both remaining thresholds), so a
+        // freshly recruited companion chats and follows immediately - the
+        // gates only start to matter later, as decay-driven withdrawal: an
+        // owner who repeatedly attacks/steals/abandons a companion can
+        // sour its bond back down past Friend or Acquaintance, and it
+        // stops complying with those specific behaviors until it's earned
+        // back (combat compliance is unaffected either way, per above).
         //
         // internal rather than private (issue #68 Tier 2's own precedent -
         // see DebugCombatAI below): the follow gate's only observable effect
@@ -439,9 +450,9 @@ namespace Server.Custom.AIAgents
                         break;
 
                     case "defend":
-                        if (!TryDefendTarget(action.Target, out var defendRejection))
+                        if (!TryDefendTarget(action.Target))
                         {
-                            ActionMetrics.RecordRejection("defend", defendRejection);
+                            ActionMetrics.RecordRejection("defend", "target_not_in_range");
                         }
                         break;
 
@@ -518,27 +529,23 @@ namespace Server.Custom.AIAgents
             return true;
         }
 
-        // Issue #39 tier gate: Bonded -> will defend. rejectionReason
-        // distinguishes "no valid target" from "bond not deep enough yet"
-        // for ActionMetrics (mirrors TryEquipItem's out-reason pattern)
-        // rather than folding both into the same generic message.
-        private bool TryDefendTarget(string targetName, out string rejectionReason)
+        // Issue #39 correction (owner review, 2026-07-28): defend has no
+        // bond-tier gate - a recruited companion (quest-gated, sharing in
+        // loot) obeys combat orders by default, the same as attack.
+        // Combat compliance is #63 Reaction & Resolve's job (a numeric
+        // bond x risk x reward roll, not a bond-tier hard gate) - until
+        // that lands, an owned companion just defends on order. Bond stays
+        // an *input* #63 will read (AffinityScore/GetTier are already
+        // exposed for it), it just isn't a combat precondition here anymore.
+        private bool TryDefendTarget(string targetName)
         {
-            if (!MeetsBondTier(CompanionBond.Tier.Bonded))
-            {
-                rejectionReason = "bond_tier_insufficient";
-                return false;
-            }
-
             var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
             if (resolved == null || !resolved.Alive)
             {
-                rejectionReason = "target_not_in_range";
                 return false;
             }
 
             GuardTarget = resolved;
-            rejectionReason = null;
             return true;
         }
 
@@ -605,9 +612,9 @@ namespace Server.Custom.AIAgents
                     return PlanStepOutcome.Success;
 
                 case "defend":
-                    if (!TryDefendTarget(step.Target, out var defendPlanRejection))
+                    if (!TryDefendTarget(step.Target))
                     {
-                        ActionMetrics.RecordRejection("defend", defendPlanRejection);
+                        ActionMetrics.RecordRejection("defend", "target_not_in_range");
                         return PlanStepOutcome.Failed;
                     }
                     return PlanStepOutcome.Success;

@@ -1,6 +1,5 @@
 using System;
 
-using Server.Mobiles;
 using Server.SkillHandlers;
 
 namespace Server.Custom.AIAgents
@@ -28,7 +27,7 @@ namespace Server.Custom.AIAgents
     //    different question of the same data: "did the owner and the
     //    companion fight the same threat together" (mutual DamageEntries
     //    membership), the concrete, server-detected definition of
-    //    "defending" this issue asks for.
+    //    "co-combat" this issue asks for.
     //  - PersonaCompanion.OnDamage / OnHeal / OnThink overrides
     //    (PersonaCompanion.cs) - the real BaseCreature/Mobile hooks for
     //    "something hurt/healed me" and "my AI timer just ticked," routed
@@ -45,7 +44,7 @@ namespace Server.Custom.AIAgents
         public static void Initialize()
         {
             Stealing.ItemStolen += OnItemStolen;
-            EventSink.OnKilledBy += OnKilledByDefendCheck;
+            EventSink.OnKilledBy += OnKilledByCoCombatCheck;
         }
 
         // Issue #39 negative: the owner attacking their own recruited
@@ -175,18 +174,36 @@ namespace Server.Custom.AIAgents
                 CompanionBondBehavior.DeliberateActRateLimitCooldown);
         }
 
-        // Issue #39 positive: "defending" is server-detected as the owner
-        // and the companion having both fought the same threat that just
-        // died - reusing the exact DamageEntries idiom CompanionEconomy's
-        // own OnKilledBy subscriber established for loot-share (#65), just
-        // asked from the opposite direction (did the owner assist the
-        // companion's fight, rather than the companion assisting the
-        // owner's kill). A second, independent EventSink.OnKilledBy
+        // Issue #39 positive, corrected 2026-07-28 (owner review on PR #16):
+        // "co-combat" - the owner and the companion having both fought the
+        // same threat that just died - reusing the exact DamageEntries
+        // idiom CompanionEconomy's own OnKilledBy subscriber established
+        // for loot-share (#65). Deliberately direction-agnostic: it never
+        // checks who the threat was originally attacking, so it covers "the
+        // owner defended the companion," "the companion defended the
+        // owner," and "both just fought something together" as one signal -
+        // fighting alongside your owner contributes to the relationship
+        // either way. A second, independent EventSink.OnKilledBy
         // subscriber - a genuinely different question over the same event,
         // not a duplicate of CompanionEconomy's own handler.
-        private static void OnKilledByDefendCheck(OnKilledByEventArgs e)
+        //
+        // internal rather than private (same Tier 2 test-seam precedent as
+        // BotAI.MeetsBondTier/DebugCombatAI): exercising this through a real
+        // Mobile death would need a Corpse, an Item subclass this headless
+        // fixture's own doc comment (CompanionWorldFixture.cs) documents as
+        // unconstructable here - Mobile.RegisterDamage (no Item involved)
+        // populates real DamageEntries instead, and this seam lets the test
+        // invoke the handler directly on the still-alive victim.
+        //
+        // Owner is read as a plain Mobile (not cast to PlayerMobile) -
+        // ControlMaster is never type-restricted anywhere else in this file
+        // (OnAttackedBy/OnHealedBy/OnItemStolen all just compare by
+        // reference), so this stays consistent with that rather than
+        // re-introducing a PlayerMobile-specific check.
+        internal static void OnKilledByCoCombatCheck(OnKilledByEventArgs e)
         {
-            if (!(e.KilledBy is PlayerMobile owner) || e.Killed == null)
+            var owner = e.KilledBy;
+            if (owner == null || e.Killed == null)
             {
                 return;
             }
@@ -220,9 +237,9 @@ namespace Server.Custom.AIAgents
 
             CompanionEconomy.TryApplyBondDelta(
                 companion,
-                CompanionBondBehavior.DefendBondBonus,
+                CompanionBondBehavior.CoCombatBondBonus,
                 CompanionBondBehavior.MaxDeltaMagnitude,
-                CompanionBondBehavior.ReasonDefend,
+                CompanionBondBehavior.ReasonCoCombat,
                 CompanionBondBehavior.DeliberateActRateLimitCooldown);
         }
 
