@@ -15,6 +15,21 @@ namespace Server.Tests.Tier2;
 // found (TileMatrix.GetLandBlock), which is why acquisition/stance/combat
 // assignment work here with zero client data: see the PR description for
 // what this harness does NOT cover (real pathing/line-of-sight).
+//
+// Issue #62 note (load-bearing, do not add Item construction here): unlike
+// Map.Tiles, Item's own ctor (Item(int itemID) -> UpdateLight() -> ItemData)
+// unconditionally requires TileData.ItemTable, and TileData's static
+// constructor *throws* (deliberately - "the server will terminate") when
+// tiledata.mul isn't found, with no graceful-degradation fallback like
+// TileMatrix has. That means no Server.Items.* type can be constructed in
+// this fixture - not a Backpack, not a custom Item subclass, nothing.
+// PersonaCompanion/BaseCreature (Mobiles, not Items) are unaffected, which
+// is why CreateCompanion/CreateAttacker below have always worked. Plan
+// steps that construct real Items (mine/sell_to_vendor/buy_from_vendor) are
+// real, correct, and reused-system-backed in production (real tiledata.mul
+// always present there) but are not exercisable end-to-end in this
+// harness - the same documented boundary as real pathing/line-of-sight
+// above, just for item art data instead of map data.
 public sealed class CompanionWorldFixture
 {
     // 0-5 and 0x7F are reserved by MapDefinitions.Configure() for the real
