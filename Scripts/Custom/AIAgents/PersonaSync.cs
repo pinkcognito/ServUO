@@ -72,6 +72,17 @@ namespace Server.Custom.AIAgents
         // Starting stats (issue #36) - optional, keys "str"/"dex"/"int".
         [JsonPropertyName("stats")]
         public Dictionary<string, int> Stats { get; set; }
+
+        // Issue #61: how this persona's NPC intent colors its disposition
+        // toward players (DispositionSystem.IntentSign) and, if the
+        // companion has real Hiding/Stealth trained via Skills above, how
+        // concealed that intent is from the passive Detect Hidden sweep.
+        // Raw string ("benign"/"neutral"/"malign") from the persona record,
+        // parsed via ParseIntent below - absent/unrecognized defaults to
+        // "neutral", same "don't fail the whole persona over one bad field"
+        // posture as ApplySkills' unknown-skill handling.
+        [JsonPropertyName("intent")]
+        public string Intent { get; set; }
     }
 
     public sealed class PersonaListResponse
@@ -96,6 +107,10 @@ namespace Server.Custom.AIAgents
         public long Version;
         public Dictionary<string, double> Skills;
         public Dictionary<string, int> Stats;
+
+        // Issue #61: parsed from PersonaListItem.Intent - see PersonaSync.
+        // ParseIntent for the string->enum rule.
+        public DispositionSystem.NpcIntent Intent;
     }
 
     // Polls the cognition sidecar's local /personas/enabled endpoint (issue
@@ -262,6 +277,7 @@ namespace Server.Custom.AIAgents
                     Version = item.Version,
                     Skills = item.Skills,
                     Stats = item.Stats,
+                    Intent = ParseIntent(item.Intent),
                 };
 
                 _known[cfg.PersonaId] = cfg;
@@ -300,6 +316,39 @@ namespace Server.Custom.AIAgents
         private static bool IsValidSpawnPoint(Map map, int x, int y)
         {
             return x >= 0 && x < map.Width && y >= 0 && y < map.Height;
+        }
+
+        // Issue #61: absent/unrecognized raw values default to Neutral -
+        // a persona authored before this field existed (or a typo) gets an
+        // ordinary disposition gradient rather than blocking the spawn.
+        // internal (not private) so Server.Tests can exercise the parsing
+        // rule directly - same InternalsVisibleTo("Server.Tests") BotAI.cs
+        // already declares for the assembly.
+        internal static DispositionSystem.NpcIntent ParseIntent(string raw)
+        {
+            if (string.Equals(raw, "benign", StringComparison.OrdinalIgnoreCase))
+            {
+                return DispositionSystem.NpcIntent.Benign;
+            }
+
+            if (string.Equals(raw, "malign", StringComparison.OrdinalIgnoreCase))
+            {
+                return DispositionSystem.NpcIntent.Malign;
+            }
+
+            return DispositionSystem.NpcIntent.Neutral;
+        }
+
+        // Issue #61: live lookup for PersonaCompanion.Intent (IRevealableIntent)
+        // and for DispositionSystem.Compute callers - deliberately NOT a
+        // stored/serialized field on PersonaCompanion (see that class's
+        // doc comment). Falls back to Neutral for an unknown/disabled
+        // persona_id, same default as an absent/unrecognized raw value.
+        public static DispositionSystem.NpcIntent GetIntent(string personaId)
+        {
+            return personaId != null && _known.TryGetValue(personaId, out var cfg)
+                ? cfg.Intent
+                : DispositionSystem.NpcIntent.Neutral;
         }
 
         private static void Spawn(PersonaConfig cfg)

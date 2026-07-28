@@ -10,6 +10,7 @@ using Server.Engines.VvV;
 using Server.Items;
 using Server.Spells;
 using Server.Network;
+using Server.Custom.AIAgents;
 
 namespace Server.Items
 {
@@ -141,6 +142,18 @@ namespace Server.SkillHandlers
         {
             if (src == null || src.Map == null || src.Location == Point3D.Zero || src.IsStaff())
                 return;
+
+            // Issue #61 part 2: intent tells run on the same passive tick
+            // but their own gate/roll (IntentTells.CanPerceiveIntent /
+            // .ShouldReveal) - deliberately NOT gated by the src.IsStaff()/
+            // map/location check above being followed by the ss <= 0 bail
+            // below, which exists only to skip the (unrelated) hidden-
+            // player-reveal scan for a src with no trained DetectHidden at
+            // all. A benign NPC has no concealment (Hiding == Stealth ==
+            // 0), so even an untrained passer-by keeps a small, honest
+            // chance to read it - see the issue's "telegraphs to any
+            // passer-by" framing.
+            IntentTells.SweepPassive(src);
 
             double ss = src.Skills[SkillName.DetectHidden].Value;
 

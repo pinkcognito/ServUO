@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using Server.ContextMenus;
 using Server.Items;
 using Server.Mobiles;
+using Server.Network;
 
 namespace Server.Custom.AIAgents
 {
@@ -11,7 +12,7 @@ namespace Server.Custom.AIAgents
     // come from a DynamoDB persona item (via PersonaSync), not a hardcoded
     // [Constructable] body like TestCompanion. One instance per spawned
     // persona; PersonaSync tracks the mapping from persona_id to instance.
-    public class PersonaCompanion : BaseCreature
+    public class PersonaCompanion : BaseCreature, IRevealableIntent
     {
         [Constructable]
         public PersonaCompanion()
@@ -41,6 +42,17 @@ namespace Server.Custom.AIAgents
 
         [CommandProperty(AccessLevel.GameMaster)]
         public int LootOwed { get; set; }
+
+        // Issue #61 (IRevealableIntent): resolved live from the persona
+        // record via PersonaSync.GetIntent every time it's read, NOT a
+        // stored/serialized field - disposition is computed, not
+        // persisted, and #39 (built in parallel) already owns the one
+        // serialized per-companion field this issue is allowed to touch
+        // (AffinityScore, at serialization v3). Falls back to Neutral if
+        // the persona has since been disabled/pruned from PersonaSync's
+        // known set.
+        [CommandProperty(AccessLevel.GameMaster)]
+        public DispositionSystem.NpcIntent Intent => PersonaSync.GetIntent(PersonaId);
 
         // Rate-limit bookkeeping for CompanionEconomy's bounded bond deltas
         // (issue #65 acceptance: "bounded, rate-limited"). Session-scoped by
@@ -144,6 +156,33 @@ namespace Server.Custom.AIAgents
                         break;
                 }
             }
+        }
+
+        // Issue #61 part 2: the intent-tell delivery. Called by
+        // IntentTells.CheckPassiveIntentTell once the passive Detect
+        // Hidden roll succeeds for `perceiver` specifically - text is a
+        // generic placeholder pending #60's authored bark tables (out of
+        // scope here; disposition-gated barks are that issue's deliverable
+        // 7). PrivateOverheadMessage, NEVER Emote() - gotcha (a): Emote is
+        // a public broadcast (Server/Mobile.cs) and would leak the tell to
+        // every bystander, not just the player who passed the roll.
+        public void OnIntentRevealed(Mobile perceiver)
+        {
+            string text;
+            switch (Intent)
+            {
+                case DispositionSystem.NpcIntent.Malign:
+                    text = "*seems to regard you with quiet malice*";
+                    break;
+                case DispositionSystem.NpcIntent.Benign:
+                    text = "*seems to regard you warmly*";
+                    break;
+                default:
+                    text = "*seems to size you up*";
+                    break;
+            }
+
+            PrivateOverheadMessage(MessageType.Emote, EmoteHue, true, text, perceiver.NetState);
         }
 
         // Issue #65 part 1: the recruitment quest's only objective is a
