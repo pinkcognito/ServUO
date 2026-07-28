@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 using Server.Custom.AIAgents;
 
@@ -108,6 +109,50 @@ namespace Server.Tests
             var now = last + cooldown;
 
             Assert.False(CompanionBond.IsRateLimited(last, now, cooldown));
+        }
+
+        // Issue #39: the dictionary-keyed overload generalizing the above to
+        // many named behavior sources (PersonaCompanion.LastBondDeltaUtcByReason)
+        // rather than one DateTime field per source.
+        [Fact]
+        public void IsRateLimited_ByReason_FalseWhenReasonNeverRecorded()
+        {
+            var byReason = new Dictionary<string, DateTime>();
+
+            Assert.False(CompanionBond.IsRateLimited(byReason, "gift", DateTime.UtcNow, TimeSpan.FromMinutes(2)));
+        }
+
+        [Fact]
+        public void IsRateLimited_ByReason_TrueWithinCooldownForThatReason()
+        {
+            var last = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var now = last + TimeSpan.FromSeconds(30);
+            var byReason = new Dictionary<string, DateTime> { ["gift"] = last };
+
+            Assert.True(CompanionBond.IsRateLimited(byReason, "gift", now, TimeSpan.FromMinutes(2)));
+        }
+
+        [Fact]
+        public void IsRateLimited_ByReason_DoesNotCrossTalkBetweenDifferentReasons()
+        {
+            // A recent "attacked_by_owner" penalty must not suppress an
+            // unrelated "gift" bonus recorded a moment later - each reason
+            // has its own independent cooldown.
+            var last = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var now = last + TimeSpan.FromSeconds(1);
+            var byReason = new Dictionary<string, DateTime> { ["attacked_by_owner"] = last };
+
+            Assert.False(CompanionBond.IsRateLimited(byReason, "gift", now, TimeSpan.FromMinutes(2)));
+        }
+
+        [Fact]
+        public void IsRateLimited_ByReason_FalseAfterCooldownElapsesForThatReason()
+        {
+            var last = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var now = last + TimeSpan.FromMinutes(5);
+            var byReason = new Dictionary<string, DateTime> { ["gift"] = last };
+
+            Assert.False(CompanionBond.IsRateLimited(byReason, "gift", now, TimeSpan.FromMinutes(2)));
         }
     }
 }

@@ -79,16 +79,38 @@ namespace Server.Custom.AIAgents
                 FollowTarget = null;
                 GuardTarget = null;
                 _moveDestination = null;
+
+                // Issue #39: only stamp this the moment Dismissed actually
+                // starts - re-calling SetPresence(Dismissed) on an already-
+                // dismissed companion (harmless no-op today) must not reset
+                // the neglect clock CompanionBondBehaviors.TickAbandonment
+                // reads below.
+                if (DismissedSinceUtc == null)
+                {
+                    DismissedSinceUtc = DateTime.UtcNow;
+                }
+            }
+            else
+            {
+                DismissedSinceUtc = null;
             }
         }
 
+        // Issue #39: when Presence last went Dismissed - in-memory/session-
+        // scoped like PersonaCompanion.LastBondDeltaUtcByReason (not
+        // serialized; a box restart resetting this is an accepted gap, same
+        // rationale as that field's own doc comment). Feeds
+        // CompanionBondBehaviors' "abandoned" bond input: a companion left
+        // Dismissed while its owner is online, for longer than
+        // CompanionBondBehavior.AbandonmentThreshold, reads as neglect.
+        internal DateTime? DismissedSinceUtc { get; private set; }
+
         // Issue #38: the one live seam that composes TogetherEvaluator's
         // pure rule with real Mobile state (owner online-ness, distance) -
-        // "define together concretely" per the design doc. Not consumed by
-        // anything in this PR (the #40 goal-tick trigger and the epic #35
-        // deliverable 4 activity governor are both still open); exposed now
-        // so the definition has exactly one place to live rather than being
-        // redecided by each future consumer.
+        // "define together concretely" per the design doc. Issue #39 is the
+        // first real consumer: CompanionBondBehaviors' time-together tick,
+        // and the tier-gated follow/chat checks below all read this instead
+        // of redeciding "together."
         public bool IsTogetherWithOwner(double? maxRange = null)
         {
             var owner = m_Mobile.ControlMaster;
@@ -96,6 +118,59 @@ namespace Server.Custom.AIAgents
             double? distance = owner != null ? m_Mobile.GetDistanceToSqrt(owner) : (double?)null;
 
             return TogetherEvaluator.IsTogether(Presence, ownerOnline, distance, maxRange);
+        }
+
+        // Issue #39, corrected 2026-07-28 (owner review on PR #16): the
+        // tier gates are Acquaintance->chat and Friend->follow only.
+        // Combat (attack/defend) is deliberately NOT gated on bond tier - a
+        // companion is recruited through a quest and shares in loot (#65),
+        // so it obeys combat orders by default; bond x risk x reward
+        // compliance is #63 Reaction & Resolve's numeric job (a roll,
+        // never a hard tier gate), not yet built. Bond stays an *input*
+        // #63 will read (AffinityScore/GetTier, unchanged), just not a
+        // precondition for defend/attack here.
+        //
+        // A companion with no ControlMaster (not yet recruited, or a
+        // GM-/TestCompanion-spawned bot the bond system never touches) is
+        // exempt from the two gates that remain - #65's own framing is "an
+        // ordinary (possibly conversational) NPC" pre-recruitment, and
+        // gating pre-existing GM/test bots that never had a bond score
+        // would be a behavior regression on #57/#59's own acceptance tests.
+        // Recruitment seeds Friend (>= both remaining thresholds), so a
+        // freshly recruited companion chats and follows immediately - the
+        // gates only start to matter later, as decay-driven withdrawal: an
+        // owner who repeatedly attacks/steals/abandons a companion can
+        // sour its bond back down past Friend or Acquaintance, and it
+        // stops complying with those specific behaviors until it's earned
+        // back (combat compliance is unaffected either way, per above).
+        //
+        // internal rather than private (issue #68 Tier 2's own precedent -
+        // see DebugCombatAI below): the follow gate's only observable effect
+        // is a real Move() call competing with base.Think()'s own
+        // wander RNG (Scripts/Mobiles/AI/BaseAI.cs WalkRandomInHome), which
+        // CompanionCombatIntegrationTests' doc comment already flags as
+        // out of this harness's reach for deterministic assertions - this
+        // seam lets Server.Tests assert the gate itself directly instead.
+        internal bool MeetsBondTier(CompanionBond.Tier minTier)
+        {
+            return !(m_Mobile is PersonaCompanion companion) || companion.ControlMaster == null ||
+                   companion.AffinityTier >= minTier;
+        }
+
+        // Issue #39 (§11 bonded-L1 exception): the concrete predicate a
+        // future activity governor (epic #35 deliverable 4, still unfiled)
+        // reads - "an L1 companion bonded to an online player is exempt [from
+        // the 8h L2/L3 sleep cap]... it stays awake as long as that player is
+        // online." Composed from this issue's own Bonded tier plus #38's
+        // IsTogetherWithOwner, exactly as the issue asks ("gate on the tier,
+        // don't redefine the governor"). This PR does not build the governor
+        // itself - only exposes the one predicate it needs, same seam-not-
+        // consumer precedent IsTogetherWithOwner itself set for #38.
+        public bool IsBondedAwakeException()
+        {
+            return m_Mobile is PersonaCompanion companion &&
+                   companion.AffinityTier == CompanionBond.Tier.Bonded &&
+                   IsTogetherWithOwner();
         }
 
         public BotAI(BaseCreature m)
@@ -179,8 +254,12 @@ namespace Server.Custom.AIAgents
             // Issue #38: dismissed is dormant - zero /decide calls, not
             // just zero actions. Gating here (rather than inside OnSpeech)
             // means OnSpeech is never even invoked while dismissed.
+            // Issue #39 tier gate: Acquaintance -> will chat (a recruited
+            // companion whose bond has soured all the way to Stranger stops
+            // talking; MeetsBondTier is a no-op for anyone not recruited).
             return Presence == CompanionPresence.Active &&
-                   from.Alive && from.InRange(m_Mobile.Location, m_Mobile.RangePerception);
+                   from.Alive && from.InRange(m_Mobile.Location, m_Mobile.RangePerception) &&
+                   MeetsBondTier(CompanionBond.Tier.Acquaintance);
         }
 
         public override void OnSpeech(SpeechEventArgs e)
@@ -291,8 +370,14 @@ namespace Server.Custom.AIAgents
                 }
             }
 
+            // Issue #39 tier gate: Friend -> will follow. FollowTarget
+            // itself stays assignable regardless of tier (SummonCompanion
+            // still sets it; a re-summon after the bond recovers resumes
+            // following with no extra step) - only the movement effect is
+            // gated here, the same state-vs-effect split Presence/Dismissed
+            // already uses.
             if (FollowTarget != null && !FollowTarget.Deleted && FollowTarget.Map == m_Mobile.Map &&
-                FollowTarget.Alive)
+                FollowTarget.Alive && MeetsBondTier(CompanionBond.Tier.Friend))
             {
                 if (!m_Mobile.InRange(FollowTarget, 1))
                 {
@@ -444,6 +529,14 @@ namespace Server.Custom.AIAgents
             return true;
         }
 
+        // Issue #39 correction (owner review, 2026-07-28): defend has no
+        // bond-tier gate - a recruited companion (quest-gated, sharing in
+        // loot) obeys combat orders by default, the same as attack.
+        // Combat compliance is #63 Reaction & Resolve's job (a numeric
+        // bond x risk x reward roll, not a bond-tier hard gate) - until
+        // that lands, an owned companion just defends on order. Bond stays
+        // an *input* #63 will read (AffinityScore/GetTier are already
+        // exposed for it), it just isn't a combat precondition here anymore.
         private bool TryDefendTarget(string targetName)
         {
             var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());

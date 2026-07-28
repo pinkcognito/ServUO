@@ -31,9 +31,12 @@ namespace Server.Custom.AIAgents
         // Issue #65: the deterministic-half bond score (CompanionBond) and
         // the running unsettled loot-share balance (LootShareCalculator).
         // Zero/Stranger until CompanionEconomy.Recruit seeds it at
-        // recruitment. #39, when it lands, owns the full per-(companion,
-        // player) sidecar-backed store - see CompanionEconomy.cs's doc
-        // comment for how this minimal field relates to that future work.
+        // recruitment. Issue #39 (reconciled 2026-07-28: this is the earned
+        // per-companion OWNER bond, not a per-player sidecar store - that
+        // framing was dropped, see #61/#64 for per-player disposition/memory
+        // instead) is the field this local, already-serialized (v3) score
+        // continues to be moved by, via CompanionBondBehaviors' full set of
+        // owner-behavior inputs.
         [CommandProperty(AccessLevel.GameMaster)]
         public int AffinityScore { get; set; }
 
@@ -54,14 +57,18 @@ namespace Server.Custom.AIAgents
         [CommandProperty(AccessLevel.GameMaster)]
         public DispositionSystem.NpcIntent Intent => PersonaSync.GetIntent(PersonaId);
 
-        // Rate-limit bookkeeping for CompanionEconomy's bounded bond deltas
-        // (issue #65 acceptance: "bounded, rate-limited"). Session-scoped by
-        // design - not serialized, so a box restart trivially clears any
-        // in-flight cooldown. That's an accepted minor gap (the box restarts
-        // on the order of many idle-shutdown minutes, not a fast-enough loop
-        // to meaningfully farm bond), not a silent one - see the PR notes.
-        internal DateTime LastPositiveBondDeltaUtc = DateTime.MinValue;
-        internal DateTime LastNegativeBondDeltaUtc = DateTime.MinValue;
+        // Rate-limit bookkeeping for CompanionEconomy.TryApplyBondDelta's
+        // bounded bond deltas (issue #65 acceptance: "bounded,
+        // rate-limited"; issue #39 extends this to a full set of behavior
+        // inputs - see CompanionBondBehavior). Keyed by reason string
+        // (CompanionBond.IsRateLimited's dictionary overload) rather than
+        // one DateTime field per source, so adding another behavior input
+        // never means adding another field here. Session-scoped by design -
+        // not serialized, so a box restart trivially clears any in-flight
+        // cooldown. That's an accepted minor gap (the box restarts on the
+        // order of many idle-shutdown minutes, not a fast-enough loop to
+        // meaningfully farm bond), not a silent one - see the PR notes.
+        internal readonly Dictionary<string, DateTime> LastBondDeltaUtcByReason = new Dictionary<string, DateTime>();
 
         // Skill values are 0-120 on the live scale ServUO already uses
         // everywhere else (SetSkill takes the same scale) - a persona
@@ -219,6 +226,44 @@ namespace Server.Custom.AIAgents
             }
 
             return base.OnDragDrop(from, dropped);
+        }
+
+        // Issue #39 negative input: the owner attacking their own recruited
+        // companion. OnDamage is the real Mobile hook every damage source
+        // already invokes (BaseCreature overrides it too, for its own
+        // speech/aggro bookkeeping) - not a new combat-tracking mechanism.
+        // Routed to CompanionBondBehaviors (the Mobile-touching glue for
+        // #39's inputs) rather than decided inline, matching how
+        // OnGoldGiven/OnDragDrop above route to CompanionEconomy.
+        public override void OnDamage(int amount, Mobile from, bool willKill)
+        {
+            CompanionBondBehaviors.OnAttackedBy(this, from);
+
+            base.OnDamage(amount, from, willKill);
+        }
+
+        // Issue #39 positive input: the owner healing their own recruited
+        // companion (spell, bandage, or potion - OnHeal fires for all of
+        // them, the same real Mobile hook BaseCreature's own OnHeal already
+        // overrides for its own bookkeeping).
+        public override void OnHeal(ref int amount, Mobile from)
+        {
+            base.OnHeal(ref amount, from);
+
+            CompanionBondBehaviors.OnHealedBy(this, from);
+        }
+
+        // Issue #39 ambient inputs (time-together / abandoned): OnThink
+        // fires every AI timer tick regardless of Presence (AITimer.OnTick
+        // calls m_Mobile.OnThink() unconditionally, before the
+        // Active/Dismissed branch in BotAI.Think()) - the same per-tick hook
+        // BaseCreature already uses for its own paralysis/hidden-detection
+        // bookkeeping, reused here rather than adding a second timer.
+        public override void OnThink()
+        {
+            base.OnThink();
+
+            CompanionBondBehaviors.OnThink(this);
         }
 
         // Issue #65 part 1: the recruitment offer. Not yet recruited =
