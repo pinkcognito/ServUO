@@ -129,11 +129,16 @@ namespace Server.Custom.AIAgents
         {
             base.Serialize(writer);
 
-            writer.Write(1); // version
+            writer.Write(2); // version
 
             var botAi = (BotAI)AIObject;
             writer.Write(botAi.BotId);
             writer.Write(botAi.PersonaId);
+            // Issue #38: presence (Active/Dismissed), serialized like
+            // BotId/PersonaId above - the box restarts constantly (§5), so
+            // a dismissed companion must come back dismissed, not silently
+            // re-activated.
+            writer.Write((int)botAi.Presence);
         }
 
         public override void Deserialize(GenericReader reader)
@@ -152,6 +157,15 @@ namespace Server.Custom.AIAgents
                 var botAi = (BotAI)AIObject;
                 botAi.BotId = reader.ReadString();
                 botAi.PersonaId = reader.ReadString();
+
+                // Issue #38: absent on a version-1 save (every companion
+                // predating this issue) - BotAI's own field default
+                // (Active) already covers that case, so there's nothing to
+                // read; only version 2+ ever wrote this value.
+                if (version >= 2)
+                {
+                    botAi.Presence = (CompanionPresence)reader.ReadInt();
+                }
             }
         }
     }

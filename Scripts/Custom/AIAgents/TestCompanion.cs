@@ -59,11 +59,15 @@ namespace Server.Custom.AIAgents
         {
             base.Serialize(writer);
 
-            writer.Write(1); // version
+            writer.Write(2); // version
 
             var botAi = (BotAI)AIObject;
             writer.Write(botAi.BotId);
             writer.Write(botAi.PersonaId);
+            // Issue #38: presence (Active/Dismissed) - see PersonaCompanion.cs
+            // for the same field; kept in sync here so the P0 spike bot
+            // doesn't silently diverge.
+            writer.Write((int)botAi.Presence);
         }
 
         public override void Deserialize(GenericReader reader)
@@ -81,6 +85,11 @@ namespace Server.Custom.AIAgents
                 var botAi = (BotAI)AIObject;
                 botAi.BotId = reader.ReadString();
                 botAi.PersonaId = reader.ReadString();
+
+                if (version >= 2)
+                {
+                    botAi.Presence = (CompanionPresence)reader.ReadInt();
+                }
             }
         }
     }
