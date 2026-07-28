@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 
+using Server.ContextMenus;
+using Server.Items;
 using Server.Mobiles;
 
 namespace Server.Custom.AIAgents
@@ -24,6 +26,30 @@ namespace Server.Custom.AIAgents
         public override bool ClickTitle => false;
 
         public string PersonaId => ((BotAI)AIObject).PersonaId;
+
+        // Issue #65: the deterministic-half bond score (CompanionBond) and
+        // the running unsettled loot-share balance (LootShareCalculator).
+        // Zero/Stranger until CompanionEconomy.Recruit seeds it at
+        // recruitment. #39, when it lands, owns the full per-(companion,
+        // player) sidecar-backed store - see CompanionEconomy.cs's doc
+        // comment for how this minimal field relates to that future work.
+        [CommandProperty(AccessLevel.GameMaster)]
+        public int AffinityScore { get; set; }
+
+        [CommandProperty(AccessLevel.GameMaster)]
+        public CompanionBond.Tier AffinityTier => CompanionBond.GetTier(AffinityScore);
+
+        [CommandProperty(AccessLevel.GameMaster)]
+        public int LootOwed { get; set; }
+
+        // Rate-limit bookkeeping for CompanionEconomy's bounded bond deltas
+        // (issue #65 acceptance: "bounded, rate-limited"). Session-scoped by
+        // design - not serialized, so a box restart trivially clears any
+        // in-flight cooldown. That's an accepted minor gap (the box restarts
+        // on the order of many idle-shutdown minutes, not a fast-enough loop
+        // to meaningfully farm bond), not a silent one - see the PR notes.
+        internal DateTime LastPositiveBondDeltaUtc = DateTime.MinValue;
+        internal DateTime LastNegativeBondDeltaUtc = DateTime.MinValue;
 
         // Skill values are 0-120 on the live scale ServUO already uses
         // everywhere else (SetSkill takes the same scale) - a persona
@@ -120,6 +146,56 @@ namespace Server.Custom.AIAgents
             }
         }
 
+        // Issue #65 part 1: the recruitment quest's only objective is a
+        // gold gift (CompanionRecruitmentQuest.GiveGoldGiftObjective); part
+        // 2's ongoing loot-share settlement reuses the exact same "owner
+        // hands the companion gold" moment. OnGoldGiven is the real
+        // BaseCreature hook vendors/pets already use for this (see
+        // CompanionEconomy.cs's doc comment) - not a new drag-drop
+        // mechanic.
+        public override bool OnGoldGiven(Mobile from, Gold dropped)
+        {
+            if (CompanionEconomy.TryHandleGift(this, from, dropped))
+            {
+                return true;
+            }
+
+            return base.OnGoldGiven(from, dropped);
+        }
+
+        // Issue #65 part 3: non-gold gear the owner drops on their recruited
+        // companion joins the "party treasury" - which is just this
+        // companion's own Backpack, the same container #59's `equip`
+        // executor (BotAI.TryEquipItem) already reads from. Gated to the
+        // owner only (PackHorse/PackAnimal.CheckAccess is the stock
+        // precedent for "who may load a creature's pack," but that helper
+        // requires Controlled == true, which BotAI deliberately never sets -
+        // see BotAI.cs's CombatAI doc comment on why - so this is a narrower,
+        // ControlMaster-only check instead of reusing PackAnimal itself).
+        public override bool OnDragDrop(Mobile from, Item dropped)
+        {
+            if (ControlMaster != null && from == ControlMaster && !(dropped is Gold))
+            {
+                return AddToBackpack(dropped);
+            }
+
+            return base.OnDragDrop(from, dropped);
+        }
+
+        // Issue #65 part 1: the recruitment offer. Not yet recruited =
+        // ordinary NPC with no ControlMaster and no controllable orders (the
+        // issue's own framing) - this entry is the only way that changes,
+        // and it disappears the moment ControlMaster is set.
+        public override void AddCustomContextEntries(Mobile from, List<ContextMenuEntry> list)
+        {
+            base.AddCustomContextEntries(from, list);
+
+            if (ControlMaster == null && from is PlayerMobile && from.Alive)
+            {
+                list.Add(new RecruitCompanionEntry(this, from));
+            }
+        }
+
         public PersonaCompanion(Serial serial)
             : base(serial)
         {
@@ -129,16 +205,23 @@ namespace Server.Custom.AIAgents
         {
             base.Serialize(writer);
 
-            writer.Write(2); // version
+            writer.Write(3); // version
 
             var botAi = (BotAI)AIObject;
             writer.Write(botAi.BotId);
             writer.Write(botAi.PersonaId);
+
             // Issue #38: presence (Active/Dismissed), serialized like
             // BotId/PersonaId above - the box restarts constantly (§5), so
             // a dismissed companion must come back dismissed, not silently
             // re-activated.
             writer.Write((int)botAi.Presence);
+
+            // Issue #65: bond state survives the constant idle-shutdown
+            // restarts (§5) same as ControlMaster already does via
+            // BaseCreature's own serialization.
+            writer.Write(AffinityScore);
+            writer.Write(LootOwed);
         }
 
         public override void Deserialize(GenericReader reader)
@@ -167,6 +250,57 @@ namespace Server.Custom.AIAgents
                     botAi.Presence = (CompanionPresence)reader.ReadInt();
                 }
             }
+
+            // Issue #65: absent on a version-1 or version-2 save (every
+            // companion predating this issue, including #38's own
+            // presence-only version 2) - AffinityScore/LootOwed default to
+            // 0/Stranger already, matching an unrecruited companion; only
+            // version 3+ ever wrote these values.
+            if (version >= 3)
+            {
+                AffinityScore = reader.ReadInt();
+                LootOwed = reader.ReadInt();
+            }
+        }
+    }
+
+    // Issue #65 part 1: the offer trigger, mirroring BaseQuester.TalkEntry's
+    // idiom (same "Talk" verb/cliloc, same context-menu-driven quest offer)
+    // without requiring PersonaCompanion to become a BaseQuester/BaseVendor.
+    internal sealed class RecruitCompanionEntry : ContextMenuEntry
+    {
+        private readonly PersonaCompanion _companion;
+        private readonly Mobile _from;
+
+        public RecruitCompanionEntry(PersonaCompanion companion, Mobile from)
+            : base(6146, 3) // "Talk"
+        {
+            _companion = companion;
+            _from = from;
+        }
+
+        public override void OnClick()
+        {
+            if (!(_from is PlayerMobile player) || !player.Alive || _companion.Deleted || _companion.ControlMaster != null)
+            {
+                return;
+            }
+
+            if (player.Quest != null)
+            {
+                if (player.Quest is CompanionRecruitmentQuest existing && existing.Companion == _companion)
+                {
+                    player.SendMessage("You've already offered to prove yourself to {0}.", _companion.Name);
+                }
+                else
+                {
+                    player.SendMessage("Finish (or abandon) your current quest before starting a new one.");
+                }
+
+                return;
+            }
+
+            new CompanionRecruitmentQuest(player, _companion).SendOffer();
         }
     }
 }

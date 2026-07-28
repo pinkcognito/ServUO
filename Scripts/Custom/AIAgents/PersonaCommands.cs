@@ -14,6 +14,7 @@ namespace Server.Custom.AIAgents
             CommandSystem.Register("SpawnPersona", AccessLevel.GameMaster, SpawnPersona_OnCommand);
             CommandSystem.Register("DespawnPersona", AccessLevel.GameMaster, DespawnPersona_OnCommand);
             CommandSystem.Register("PersonaActionStats", AccessLevel.GameMaster, PersonaActionStats_OnCommand);
+            CommandSystem.Register("PersonaBondStatus", AccessLevel.GameMaster, PersonaBondStatus_OnCommand);
         }
 
         // Usage: [SpawnPersona <display name or persona_id>
@@ -119,6 +120,48 @@ namespace Server.Custom.AIAgents
             {
                 e.Mobile.SendMessage("  {0} ({1}): {2}", actionType, reason, count);
             }
+        }
+
+        // Usage: [PersonaBondStatus <display name or persona_id>
+        // Issue #65: in-game visibility into the deterministic bond half -
+        // recruitment state, affinity tier/score, and any unsettled loot
+        // share - without reading server logs. Mirrors PersonaActionStats'
+        // resolve-then-report shape.
+        private static void PersonaBondStatus_OnCommand(CommandEventArgs e)
+        {
+            if (e.Length < 1)
+            {
+                e.Mobile.SendMessage("Usage: PersonaBondStatus <display name or persona_id>");
+                return;
+            }
+
+            var reference = ReadReference(e);
+            var resolution = PersonaSync.ResolveSpawned(reference);
+
+            if (!resolution.Found)
+            {
+                e.Mobile.SendMessage("No spawned persona found matching '{0}'.", reference);
+                return;
+            }
+
+            var companion = PersonaSync.FindSpawned(resolution.PersonaId);
+
+            if (companion == null)
+            {
+                e.Mobile.SendMessage("No spawned persona found with id '{0}'.", resolution.PersonaId);
+                return;
+            }
+
+            if (companion.ControlMaster == null)
+            {
+                e.Mobile.SendMessage("{0} is not recruited (no ControlMaster).", companion.Name);
+                return;
+            }
+
+            e.Mobile.SendMessage(
+                "{0}: bonded to {1}, {2} (score {3}/{4}), loot owed: {5} gold",
+                companion.Name, companion.ControlMaster.Name, companion.AffinityTier,
+                companion.AffinityScore, CompanionBond.MaxScore, companion.LootOwed);
         }
 
         // A display_name can contain spaces, so accept the whole argument
