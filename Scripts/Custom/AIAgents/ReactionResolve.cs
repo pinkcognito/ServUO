@@ -238,14 +238,19 @@ namespace Server.Custom.AIAgents
         private const int LoyaltyScaleMax = 100;
         private const int LoyaltyDivisor = 25;
         private const int BondDivisor = 250;
+        private const int MaxLoyaltyModifier = 4;
 
+        // Clamped so the "-4..+4" contract in the comment above holds even
+        // if a caller ever hands in an out-of-band Loyalty/bond value (e.g.
+        // content that pokes BaseCreature.Loyalty directly) rather than
+        // relying on both inputs always staying in their documented range.
         public static int LoyaltyModifier(int loyalty, int bondScore)
         {
             var loyaltyPart = (loyalty - (LoyaltyScaleMax / 2)) / LoyaltyDivisor;
             var bondMidpoint = (CompanionBond.MinScore + CompanionBond.MaxScore) / 2;
             var bondPart = (bondScore - bondMidpoint) / BondDivisor;
 
-            return loyaltyPart + bondPart;
+            return Math.Min(Math.Max(loyaltyPart + bondPart, -MaxLoyaltyModifier), MaxLoyaltyModifier);
         }
 
         // How outmatched the companion reads against a target: self
@@ -321,6 +326,13 @@ namespace Server.Custom.AIAgents
                 throw new ArgumentNullException(nameof(dice));
             }
 
+            // Carries the near-death morale roll's own log line forward when
+            // it holds and execution falls through to the kind-specific
+            // check below - otherwise that roll (the first thing that
+            // actually fired) would silently vanish from the logged Reason,
+            // even though it's what let the order proceed at all.
+            string nearDeathPreamble = null;
+
             if (inputs.NearDeath || kind == OrderKind.RiskyCombat)
             {
                 var effectiveMorale = inputs.BaseMorale + inputs.LoyaltyMod - inputs.ThreatPenalty;
@@ -341,7 +353,10 @@ namespace Server.Custom.AIAgents
                 }
 
                 // Near death but not a combat order, and morale held - fall
-                // through to the order's own check below.
+                // through to the order's own check below, carrying this
+                // roll's line forward instead of dropping it.
+                nearDeathPreamble = string.Format(
+                    "near-death morale held (roll {0} vs effective morale {1}); ", moraleRoll, effectiveMorale);
             }
 
             switch (kind)
@@ -357,7 +372,8 @@ namespace Server.Custom.AIAgents
                         CheckKind = CheckKind.Reaction,
                         Roll = roll,
                         Modifier = inputs.LoyaltyMod,
-                        Reason = string.Format("reaction {0} vs roll {1} (loyalty mod {2})", outcome, roll, inputs.LoyaltyMod),
+                        Reason = nearDeathPreamble + string.Format(
+                            "reaction {0} vs roll {1} (loyalty mod {2})", outcome, roll, inputs.LoyaltyMod),
                     };
                 }
 
@@ -372,7 +388,8 @@ namespace Server.Custom.AIAgents
                         CheckKind = CheckKind.Trait,
                         Roll = roll,
                         Modifier = inputs.CruelTrait,
-                        Reason = string.Format("trait {0} vs roll {1} (cruel trait {2})", outcome, roll, inputs.CruelTrait),
+                        Reason = nearDeathPreamble + string.Format(
+                            "trait {0} vs roll {1} (cruel trait {2})", outcome, roll, inputs.CruelTrait),
                     };
                 }
 

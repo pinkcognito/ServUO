@@ -628,6 +628,13 @@ namespace Server.Custom.AIAgents
             // never inspected again. A blocked/failed say (not possible yet
             // with an authored line, but true once #40 wires model
             // narration in) must not drop the outcome already decided.
+            //
+            // Deliberately bypasses the CLAUDE.md invariant 5 moderation
+            // gate every other outbound say/emote passes through - a
+            // conscious exception, not an oversight: these lines are fixed,
+            // PR-reviewed constants (ReactionBarkTable), never model output
+            // or player text, so there is nothing left for that gate to
+            // catch.
             if (ReactionResolve.IsDarkFlavor(kind, result.Outcome))
             {
                 var line = ReactionBarkTable.Pick(result.Outcome, result.Roll);

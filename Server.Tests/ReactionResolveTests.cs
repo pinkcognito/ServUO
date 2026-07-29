@@ -339,6 +339,24 @@ namespace Server.Tests
         }
 
         [Fact]
+        public void SeededDiceRoller_ProducesTheSameSequenceAcrossInstances()
+        {
+            // Resolve_IsReproducible_FromASeededRoller only compares one
+            // roll per instance (Routine order kind = single dice.Roll
+            // call); this checks sequence stability across several
+            // successive rolls from two independently-constructed rollers
+            // with the same seed, the way NearDeath + a kind-specific check
+            // draws more than one roll per Resolve() call.
+            var a = new SeededDiceRoller(99);
+            var b = new SeededDiceRoller(99);
+
+            for (var i = 0; i < 5; i++)
+            {
+                Assert.Equal(a.Roll(2, 6), b.Roll(2, 6));
+            }
+        }
+
+        [Fact]
         public void Resolve_LogsTheRollAndModifier()
         {
             var inputs = new ReactionInputs

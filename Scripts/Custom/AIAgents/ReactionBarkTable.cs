@@ -23,6 +23,15 @@ namespace Server.Custom.AIAgents
             "With pleasure.",
         };
 
+        // Currently unreachable: ReactionResolve.TraitOutcome (the only
+        // check IsDarkFlavor's MorallyLoaded gate is ever paired with)
+        // returns ComplyEager or ComplyGrudging, never plain Comply,
+        // and the near-death morale pre-check only returns early on Flee -
+        // a held morale roll always falls through to the trait check
+        // instead of surfacing here. Kept (rather than dropped) as a
+        // defensive match for IsDarkFlavor's own outcome set, in case a
+        // future check feeding a MorallyLoaded order does produce a plain
+        // Comply.
         private static readonly string[] ComplyLines =
         {
             "Fine. It's done.",
