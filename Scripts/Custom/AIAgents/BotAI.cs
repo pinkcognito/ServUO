@@ -23,9 +23,31 @@ namespace Server.Custom.AIAgents
     {
         private const int NearbyRange = 10;
 
+        // Issue #63: below this self hp% fraction, an order-bound companion
+        // rolls morale before anything else, regardless of order kind - "any
+        // order, near death: morale first, flee overrides" per the design
+        // table.
+        private const double NearDeathHpThreshold = 0.25;
+
         private bool _awaitingDecision;
         private BaseAI _combatAI;
         private (int X, int Y)? _moveDestination;
+
+        // Issue #63: production dice source for ReactionResolve (ServUO's
+        // own Utility.Dice). Server.Tests' pure ReactionResolveTests exercise
+        // the check directly with a SeededDiceRoller/FixedDiceRoller instead
+        // of this field; DebugDiceRoller below is the live-companion
+        // equivalent for Tier 2 integration tests.
+        private IDiceRoller _diceRoller = new UtilityDiceRoller();
+
+        // Test-only seam (issue #63, mirrors DebugCombatAI) - lets Tier 2
+        // integration tests inject a deterministic roll instead of real
+        // Utility.Dice when exercising ShouldComplyWithOrder through a live
+        // ApplyActions call.
+        internal IDiceRoller DebugDiceRoller
+        {
+            set => _diceRoller = value;
+        }
 
         public string BotId { get; set; }
         public string PersonaId { get; set; }
@@ -443,16 +465,16 @@ namespace Server.Custom.AIAgents
                         }
 
                     case "attack":
-                        if (!TryAttackTarget(action.Target))
+                        if (!TryAttackTarget(action.Target, out var attackRejection))
                         {
-                            ActionMetrics.RecordRejection("attack", "target_not_in_range");
+                            ActionMetrics.RecordRejection("attack", attackRejection);
                         }
                         break;
 
                     case "defend":
-                        if (!TryDefendTarget(action.Target))
+                        if (!TryDefendTarget(action.Target, out var defendRejection))
                         {
-                            ActionMetrics.RecordRejection("defend", "target_not_in_range");
+                            ActionMetrics.RecordRejection("defend", defendRejection);
                         }
                         break;
 
@@ -517,10 +539,19 @@ namespace Server.Custom.AIAgents
         // Extracted from ApplyActions' "attack" case (issue #62) so
         // ExecutePlanStep can dispatch through the identical validated path
         // an ad-hoc /decide action already uses, rather than duplicating it.
-        private bool TryAttackTarget(string targetName)
+        // out rejectionReason mirrors TryEquipItem's convention - a single
+        // recording point at the call site instead of guessing "why" from a
+        // bool.
+        private bool TryAttackTarget(string targetName, out string rejectionReason)
         {
             var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
             if (resolved == null || !resolved.Alive)
+            {
+                rejectionReason = "target_not_in_range";
+                return false;
+            }
+
+            if (!ShouldComplyWithOrder(resolved, "attack", out rejectionReason))
             {
                 return false;
             }
@@ -532,21 +563,135 @@ namespace Server.Custom.AIAgents
         // Issue #39 correction (owner review, 2026-07-28): defend has no
         // bond-tier gate - a recruited companion (quest-gated, sharing in
         // loot) obeys combat orders by default, the same as attack.
-        // Combat compliance is #63 Reaction & Resolve's job (a numeric
-        // bond x risk x reward roll, not a bond-tier hard gate) - until
-        // that lands, an owned companion just defends on order. Bond stays
-        // an *input* #63 will read (AffinityScore/GetTier are already
-        // exposed for it), it just isn't a combat precondition here anymore.
-        private bool TryDefendTarget(string targetName)
+        // Issue #63 is what replaces that placeholder: ShouldComplyWithOrder
+        // below is the numeric bond x risk x alignment roll this comment
+        // used to defer to. Bond (AffinityScore/GetTier) is now a real
+        // *input* to that roll (ReactionResolve.LoyaltyModifier), not a
+        // combat precondition.
+        private bool TryDefendTarget(string targetName, out string rejectionReason)
         {
             var resolved = ActionValidator.ResolveTarget(targetName, NearbyMobileCandidates());
             if (resolved == null || !resolved.Alive)
+            {
+                rejectionReason = "target_not_in_range";
+                return false;
+            }
+
+            if (!ShouldComplyWithOrder(resolved, "defend", out rejectionReason))
             {
                 return false;
             }
 
             GuardTarget = resolved;
             return true;
+        }
+
+        // Issue #63 (Reaction & Resolve): the numeric compliance gate for an
+        // owner-issued combat order. Only gates a *recruited* companion
+        // (ControlMaster set) - a GM-spawned/unowned bot (TestCompanion,
+        // an un-recruited PersonaCompanion) has no owner to weigh
+        // loyalty/bond against, so it passes through unchanged, exactly as
+        // before this issue.
+        //
+        // The model is never consulted here (see ReactionResolve's doc
+        // comment on why) - this is plain arithmetic over grounded state,
+        // and every roll is logged so a GM can always see why a companion
+        // balked (issue acceptance).
+        private bool ShouldComplyWithOrder(Mobile target, string actionType, out string rejectionReason)
+        {
+            if (!(m_Mobile is PersonaCompanion companion) || companion.ControlMaster == null)
+            {
+                rejectionReason = null;
+                return true;
+            }
+
+            var kind = ClassifyOrderKind(target);
+            var selfHpPercent = m_Mobile.HitsMax > 0 ? (double)m_Mobile.Hits / m_Mobile.HitsMax : 1.0;
+            var targetPower = target.HitsMax > 0 ? target.HitsMax : target.Hits;
+
+            var inputs = new ReactionInputs
+            {
+                LoyaltyMod = ReactionResolve.LoyaltyModifier(m_Mobile.Loyalty, companion.AffinityScore),
+                BaseMorale = ReactionResolve.DefaultBaseMorale,
+                ThreatPenalty = ReactionResolve.ThreatPenalty(selfHpPercent, BestCombatSkillValue(), targetPower),
+                CruelTrait = ReactionResolve.CruelTrait(companion.Intent, m_Mobile.Karma),
+                NearDeath = selfHpPercent < NearDeathHpThreshold,
+            };
+
+            var result = ReactionResolve.Resolve(kind, inputs, _diceRoller);
+
+            Console.WriteLine(
+                "BotAI: {0} order '{1}' on '{2}' -> {3}", companion.PersonaId, actionType, target.Name, result);
+
+            // Issue #63 hard requirement: the flavor line (if any) never
+            // gates the action below - it's fired here as a side effect and
+            // never inspected again. A blocked/failed say (not possible yet
+            // with an authored line, but true once #40 wires model
+            // narration in) must not drop the outcome already decided.
+            //
+            // Deliberately bypasses the CLAUDE.md invariant 5 moderation
+            // gate every other outbound say/emote passes through - a
+            // conscious exception, not an oversight: these lines are fixed,
+            // PR-reviewed constants (ReactionBarkTable), never model output
+            // or player text, so there is nothing left for that gate to
+            // catch.
+            if (ReactionResolve.IsDarkFlavor(kind, result.Outcome))
+            {
+                var line = ReactionBarkTable.Pick(result.Outcome, result.Roll);
+                if (!string.IsNullOrEmpty(line))
+                {
+                    m_Mobile.Say(line);
+                }
+            }
+
+            switch (result.Outcome)
+            {
+                case Outcome.ComplyEager:
+                case Outcome.Comply:
+                case Outcome.ComplyGrudging:
+                    rejectionReason = null;
+                    return true;
+
+                case Outcome.Flee:
+                    // Reuses the same stock flee delegation the explicit
+                    // `flee` action and issue #57's low-HP reflex both use.
+                    CombatAI.Action = ActionType.Flee;
+                    rejectionReason = "reaction_flee";
+                    return false;
+
+                default:
+                    rejectionReason = "reaction_" + result.Outcome.ToString().ToLowerInvariant();
+                    return false;
+            }
+        }
+
+        // A target that reads as Notoriety.Innocent is the morally-loaded
+        // case (issue #63's "harm an Innocent" example) - decided by the
+        // companion's own Merciful/Cruel trait, never the model. Everything
+        // else (an aggressor, a monster, a criminal) is ordinary risky
+        // combat, decided by morale.
+        private OrderKind ClassifyOrderKind(Mobile target)
+        {
+            return Notoriety.Compute(m_Mobile, target) == Notoriety.Innocent
+                ? OrderKind.MorallyLoaded
+                : OrderKind.RiskyCombat;
+        }
+
+        // Same skill set/priority SelectCombatAI already reads to pick a
+        // stance - reused here as "how capable is this companion in a
+        // fight" for ReactionResolve.ThreatPenalty, rather than a second
+        // invented capability number.
+        private double BestCombatSkillValue()
+        {
+            return new[]
+            {
+                m_Mobile.Skills[SkillName.Magery].Base,
+                m_Mobile.Skills[SkillName.Archery].Base,
+                m_Mobile.Skills[SkillName.Swords].Base,
+                m_Mobile.Skills[SkillName.Fencing].Base,
+                m_Mobile.Skills[SkillName.Macing].Base,
+                m_Mobile.Skills[SkillName.Wrestling].Base,
+            }.Max();
         }
 
         private bool TryEquipItem(string itemName, out string rejectionReason)
@@ -604,17 +749,17 @@ namespace Server.Custom.AIAgents
                     return ExecuteBuyStep(step);
 
                 case "attack":
-                    if (!TryAttackTarget(step.Target))
+                    if (!TryAttackTarget(step.Target, out var attackRejection))
                     {
-                        ActionMetrics.RecordRejection("attack", "target_not_in_range");
+                        ActionMetrics.RecordRejection("attack", attackRejection);
                         return PlanStepOutcome.Failed;
                     }
                     return PlanStepOutcome.Success;
 
                 case "defend":
-                    if (!TryDefendTarget(step.Target))
+                    if (!TryDefendTarget(step.Target, out var defendRejection))
                     {
-                        ActionMetrics.RecordRejection("defend", "target_not_in_range");
+                        ActionMetrics.RecordRejection("defend", defendRejection);
                         return PlanStepOutcome.Failed;
                     }
                     return PlanStepOutcome.Success;
