@@ -362,36 +362,36 @@ namespace Server.Custom.AIAgents
             switch (kind)
             {
                 case OrderKind.Routine:
-                {
-                    var roll = dice.Roll(2, 6);
-                    var outcome = ReactionOutcome(roll, inputs.LoyaltyMod);
-                    return new ReactionResult
                     {
-                        Outcome = outcome,
-                        OrderKind = kind,
-                        CheckKind = CheckKind.Reaction,
-                        Roll = roll,
-                        Modifier = inputs.LoyaltyMod,
-                        Reason = nearDeathPreamble + string.Format(
-                            "reaction {0} vs roll {1} (loyalty mod {2})", outcome, roll, inputs.LoyaltyMod),
-                    };
-                }
+                        var roll = dice.Roll(2, 6);
+                        var outcome = ReactionOutcome(roll, inputs.LoyaltyMod);
+                        return new ReactionResult
+                        {
+                            Outcome = outcome,
+                            OrderKind = kind,
+                            CheckKind = CheckKind.Reaction,
+                            Roll = roll,
+                            Modifier = inputs.LoyaltyMod,
+                            Reason = nearDeathPreamble + string.Format(
+                                "reaction {0} vs roll {1} (loyalty mod {2})", outcome, roll, inputs.LoyaltyMod),
+                        };
+                    }
 
                 case OrderKind.MorallyLoaded:
-                {
-                    var roll = dice.Roll(1, 20);
-                    var outcome = TraitOutcome(roll, inputs.CruelTrait);
-                    return new ReactionResult
                     {
-                        Outcome = outcome,
-                        OrderKind = kind,
-                        CheckKind = CheckKind.Trait,
-                        Roll = roll,
-                        Modifier = inputs.CruelTrait,
-                        Reason = nearDeathPreamble + string.Format(
-                            "trait {0} vs roll {1} (cruel trait {2})", outcome, roll, inputs.CruelTrait),
-                    };
-                }
+                        var roll = dice.Roll(1, 20);
+                        var outcome = TraitOutcome(roll, inputs.CruelTrait);
+                        return new ReactionResult
+                        {
+                            Outcome = outcome,
+                            OrderKind = kind,
+                            CheckKind = CheckKind.Trait,
+                            Roll = roll,
+                            Modifier = inputs.CruelTrait,
+                            Reason = nearDeathPreamble + string.Format(
+                                "trait {0} vs roll {1} (cruel trait {2})", outcome, roll, inputs.CruelTrait),
+                        };
+                    }
 
                 default:
                     throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
